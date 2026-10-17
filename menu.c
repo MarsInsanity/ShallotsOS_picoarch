@@ -656,9 +656,14 @@ static const char h_ff_enabled[]      = "Allow fast-forward (SELECT+R1). Off by 
 static const char h_rewind_enabled[]  = "Allow rewind (hold SELECT+B). Uses RAM and slows frames; off by default.";
 
 static const char h_audio_buffer_size[]        =
+#ifdef PLATFORM_SF3000
+	"Each step buffers 10 ms of sound. Higher values\n"
+	"reduce crackling at the cost of delayed sound.";
+#else
 	"The size of the audio buffer, in frames. Higher\n"
 	"values reduce the risk of audio crackling at the\n"
 	"cost of delayed sound.";
+#endif
 
 
 
