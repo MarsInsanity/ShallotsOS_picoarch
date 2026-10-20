@@ -846,6 +846,9 @@ static void count_fps(void)
 static void adjust_audio(void) {
 	static unsigned prev_audio_buffer_size = 0;
 
+	if (!prev_audio_buffer_size)
+		prev_audio_buffer_size = current_audio_buffer_size;
+
 	current_audio_buffer_size = MAX(audio_buffer_size, audio_buffer_size_override);
 
 	if (prev_audio_buffer_size != current_audio_buffer_size) {
