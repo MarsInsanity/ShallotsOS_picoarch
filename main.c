@@ -13,6 +13,7 @@
 #include <time.h>
 #include <dirent.h>
 #include <malloc.h>
+#include <dlfcn.h>
 
 #define FROGUI_CORE "/mnt/sdcard/cubegm/cores/frogui_libretro.so"
 #define PICOARCH_BIN    "/mnt/sdcard/cubegm/picoarch"
@@ -41,7 +42,6 @@ static const char *picoarch_for_core(const char *core) {
 #include "util.h"
 
 #ifdef MMENU
-#include <dlfcn.h>
 #include <mmenu.h>
 #include <SDL/SDL.h>
 void* mmenu = NULL;
@@ -54,6 +54,9 @@ char core_name[MAX_PATH];
 int config_override = 0;
 int g_debug_frame = 0;
 static int g_stock_battery = 1; /* SF3000 cubevol indicator; harmless elsewhere */
+static int content_restart_requested;
+static char restart_core_path[MAX_PATH];
+static char restart_content_path[MAX_PATH];
 
 static int memory_profile_enabled;
 static const char *memory_profile_path;
@@ -208,8 +211,10 @@ void dbg_log(const char *fmt, ...) {
 	static FILE *lf = NULL;
 	static unsigned log_lines;
 	if (enabled == -1) {
-		if (access("/mnt/sdcard/log.txt", F_OK) == 0)
+		if (access("/mnt/sdcard/log.txt", F_OK) == 0) {
+			mkdir("/mnt/sdcard/logs", 0777);
 			lf = fopen("/mnt/sdcard/logs/picoarch.log", "a");
+		}
 		enabled = (lf != NULL) ? 1 : 0;
 	}
 	if (!enabled || !lf) return;
@@ -750,6 +755,12 @@ void handle_emu_action(emu_action action)
 			DBG("DBG menu_loop: ENTER\n");
 			menu_loop();
 			DBG("DBG menu_loop: EXIT\n");
+			/* FroggyKVM owns retro_run() for the lifetime of JavaTask. Ask it to
+			 * unwind after Exit so this frontend can reach its shutdown loop. */
+			if (should_quit && current_core.handle) {
+				void (*request_exit)(void) = dlsym(current_core.handle, "froggykvm_request_exit");
+				if (request_exit) request_exit();
+			}
 			fb1_menu_exit();
 #ifdef MMENU
 		}
@@ -1286,6 +1297,12 @@ int quit(int code) {
 		next_is_image_viewer = next_is_standalone &&
 			strstr(rom_path, "/image_viewer") != NULL;
 	}
+	if (!core_path[0] && !rom_path[0] && content_restart_requested) {
+		snprintf(core_path, sizeof(core_path), "%s", restart_core_path);
+		snprintf(rom_path, sizeof(rom_path), "%s", restart_content_path);
+		content_restart_requested = 0;
+		DBG("DBG restart: consuming one-shot relaunch for %s\n", rom_path);
+	}
 
 	DBG("DBG quit: use_hwdisp=%d next_standalone=%d core_path[0]=%d rom_path[0]=%d\n",
 	        sf3000_use_hwdisp, next_is_standalone, !!core_path[0], !!rom_path[0]);
@@ -1379,4 +1396,16 @@ int quit(int code) {
 
 	plat_finish();
 	exit(code);
+}
+void request_content_restart(void)
+{
+#ifdef PLATFORM_SF3000
+	if (!content || !content->path || !core_path[0])
+		return;
+
+	snprintf(restart_core_path, sizeof(restart_core_path), "%s", core_path);
+	snprintf(restart_content_path, sizeof(restart_content_path), "%s", content->path);
+	content_restart_requested = 1;
+	DBG("DBG restart: armed one-shot relaunch for %s\n", content->path);
+#endif
 }

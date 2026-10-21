@@ -58,5 +58,6 @@ void handle_emu_action(emu_action action);
 void core_log_cb(enum retro_log_level level, const char *fmt, ...);
 void pa_track_render(void);
 int quit(int code);
+void request_content_restart(void);
 
 #endif /* __MAIN_H__ */

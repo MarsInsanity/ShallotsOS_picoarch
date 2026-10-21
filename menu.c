@@ -624,17 +624,8 @@ static int menu_loop_core_options_page(int offset, int keys) {
 	core_options_loop(e_menu_core_options, page_entries, menu_idx, &sel);
 
 	options_update_changed();
-
-	/* FroggyKVM must create its LCD before the JVM starts. Persist this one
-	 * option per JAR so relaunching immediately uses the selected phone size. */
-	if (j2me_screen && j2me_screen->value != old_j2me_screen) {
+	if (j2me_screen && j2me_screen->value != old_j2me_screen)
 		save_config(1);
-		FILE *launch = fopen("/tmp/frogui_launch.txt", "w");
-		if (launch) {
-			fprintf(launch, "%s\n%s\n", core_path, content->path);
-			fclose(launch);
-		}
-	}
 
 	free(e_menu_core_options);
 

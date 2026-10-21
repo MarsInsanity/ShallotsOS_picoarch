@@ -17,6 +17,7 @@
 #include "util.h"
 
 extern int g_debug_frame;
+#define RETRO_ENVIRONMENT_FROGGYKVM_RESTART 0x10001
 struct core_cbs current_core;
 char core_path[MAX_PATH];
 struct content *content;
@@ -334,7 +335,13 @@ static void set_directories(const char *core_name, const char *tag_name) {
 	mkdir("/mnt/sdcard/picoarch", 0755);
 	mkdir(config_dir, 0755);
 
-	snprintf(save_dir, MAX_PATH, "%s/%s/", sd, tag_name);
+	if (strcmp(tag_name, "j2me") == 0) {
+		mkdir("/mnt/sdcard/saves", 0755);
+		mkdir("/mnt/sdcard/saves/j2me", 0755);
+		snprintf(save_dir, MAX_PATH, "/mnt/sdcard/saves/j2me/");
+	} else {
+		snprintf(save_dir, MAX_PATH, "%s/%s/", sd, tag_name);
+	}
 	snprintf(system_dir, MAX_PATH, "/mnt/sdcard/cubegm/bios");
 	mkdir("/mnt/sdcard/cubegm/bios", 0755);
 	(void)home; (void)sdcard_path;
@@ -558,6 +565,12 @@ static bool pa_environment(unsigned cmd, void *data) {
 		should_quit = true;
 		break;
 	}
+	/* TreeFrogUI private extension: a core may explicitly request that its
+	 * current content be relaunched. Keep this separate from SHUTDOWN so a
+	 * normal Exit can never inherit a stale restart request. */
+	case RETRO_ENVIRONMENT_FROGGYKVM_RESTART:
+		request_content_restart();
+		break;
 	default:
 		PA_DEBUG("Unsupported environment cmd: %u\n", cmd);
 		return false;
@@ -746,6 +759,9 @@ int core_open(const char *corefile, const char *tag_name) {
 	void (*set_input_state)(retro_input_state_t) = NULL;
 
 	PA_INFO("Loading core %s\n", corefile);
+#ifdef PLATFORM_SF3000
+	fprintf(stderr, "TFDBG core_open begin %s\n", corefile);
+#endif
 
 	memset(&current_core, 0, sizeof(current_core));
 	memset(&frame_time_cb_info, 0, sizeof(frame_time_cb_info));
@@ -759,7 +775,11 @@ int core_open(const char *corefile, const char *tag_name) {
 	}
 
 	if (!current_core.handle) {
-		PA_ERROR("Couldn't load core: %s\n", dlerror());
+		const char *err = dlerror();
+		PA_ERROR("Couldn't load core: %s\n", err ? err : "unknown dlopen error");
+#ifdef PLATFORM_SF3000
+		fprintf(stderr, "TFDBG core_open dlopen failed: %s\n", err ? err : "unknown");
+#endif
 		return -1;
 	}
 
@@ -784,6 +804,12 @@ int core_open(const char *corefile, const char *tag_name) {
 	current_core.retro_get_region = dlsym(current_core.handle, "retro_get_region");
 	current_core.retro_get_memory_data = dlsym(current_core.handle, "retro_get_memory_data");
 	current_core.retro_get_memory_size = dlsym(current_core.handle, "retro_get_memory_size");
+	#ifdef PLATFORM_SF3000
+	fprintf(stderr, "TFDBG core_open symbols load=%p init=%p run=%p\n",
+	        (void *)current_core.retro_load_game,
+	        (void *)current_core.retro_init,
+	        (void *)current_core.retro_run);
+	#endif
 
 	set_environment = dlsym(current_core.handle, "retro_set_environment");
 	set_video_refresh = dlsym(current_core.handle, "retro_set_video_refresh");
@@ -820,9 +846,15 @@ int core_open(const char *corefile, const char *tag_name) {
 }
 
 void core_load(void) {
+#ifdef PLATFORM_SF3000
+	fprintf(stderr, "TFDBG core_load begin\n");
+#endif
 	current_core.retro_init();
 	current_core.initialized = true;
 	PA_INFO("Finished loading core\n");
+#ifdef PLATFORM_SF3000
+	fprintf(stderr, "TFDBG core_load done\n");
+#endif
 }
 
 int core_load_content(struct content *content) {
@@ -837,11 +869,20 @@ int core_load_content(struct content *content) {
 	}
 
 	DBG("DBG M5b: retro_load_game path=%s\n", game_info.path ? game_info.path : "(null)");
+	#ifdef PLATFORM_SF3000
+	fprintf(stderr, "TFDBG core_load_content begin path=%s\n", game_info.path ? game_info.path : "(null)");
+	#endif
 	if (!current_core.retro_load_game(&game_info)) {
 		PA_ERROR("Couldn't load content\n");
+	#ifdef PLATFORM_SF3000
+		fprintf(stderr, "TFDBG core_load_content failed\n");
+		#endif
 		goto finish;
 	}
 	DBG("DBG M5c: retro_load_game returned\n");
+	#ifdef PLATFORM_SF3000
+	fprintf(stderr, "TFDBG core_load_content done\n");
+	#endif
 
 	content_based_name(content, cheats_path, sizeof(cheats_path), config_dir, "cheats/", ".cht");
 	if (cheats_path[0] != '\0') {
