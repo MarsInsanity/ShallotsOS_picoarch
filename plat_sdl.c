@@ -2025,7 +2025,15 @@ static int plat_sound_init(void)
 float plat_sound_capacity(void)
 {
 #ifdef PLATFORM_SF3000
-	return 1.0;
+	static float last_capacity = 1.0;
+	if (pthread_mutex_trylock(&sf3000_aring_mtx) == 0) {
+		unsigned queued = sf3000_aring_w - sf3000_aring_r;
+		if (queued > SF3000_ARING_FRAMES)
+			queued = SF3000_ARING_FRAMES;
+		last_capacity = 1.0f - (float)queued / SF3000_ARING_FRAMES;
+		pthread_mutex_unlock(&sf3000_aring_mtx);
+	}
+	return last_capacity;
 #else
 	int buffered = 0;
 	if (audio.buf_len == 0)

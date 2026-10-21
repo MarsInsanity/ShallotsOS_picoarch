@@ -468,9 +468,9 @@ static void core_option_field(char *dst, size_t dst_size, const char *src,
 		return;
 	}
 
-	/* Show the beginning for 900ms, then move one character every 140ms.
+	/* Show the beginning for 250ms, then move one character every 70ms.
 	 * Three spaces make the wrap point clear. */
-	size_t pos = elapsed_ms < 900 ? 0 : 1 + (elapsed_ms - 900) / 140;
+	size_t pos = elapsed_ms < 250 ? 0 : 1 + (elapsed_ms - 250) / 70;
 	size_t cycle = len + 3;
 	for (size_t i = 0; i < visible; i++) {
 		size_t at = (pos + i) % cycle;
