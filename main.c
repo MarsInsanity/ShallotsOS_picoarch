@@ -1330,36 +1330,18 @@ int quit(int code) {
 		DBG("DBG quit: hwdisp_deinit done\n");
 	}
 	/* libffplayer also owns AUDDEC/I2SO. Release only picoarch's proprietary
-	 * audio engine here. A full plat_finish() closes SDL/fb0 and prevents the
-	 * firmware player loader from reaching main(), while leaving audio active
-	 * makes audio-master video wait forever. The amp line must stay OPEN:
-	 * libffplayer re-inits the whole digital audio path but never touches the
-	 * physical mute pad - a closed line here meant a silent video (the line
-	 * now lives in the caller, not in finish_for_exec). */
+	 * audio engine so the firmware player can initialize its own path. */
 	if (next_is_video_player || next_is_image_viewer) {
 		extern void sf3000_sound_finish_for_exec(void);
-		extern void sf3000_sound_open_for_exec(void);
 		sf3000_sound_finish_for_exec();
-		sf3000_sound_open_for_exec();
-		DBG("DBG quit: audio cleanup done + speaker line open for media app\n");
+		DBG("DBG quit: audio cleanup done for media app\n");
 	}
-	/* Standalone apps own their audio and have no gate: hand the amp line
-	 * over OPEN (the video player above keeps it closed because libffplayer
-	 * re-inits the whole audio path itself).
-	 * ORDER MATTERS - fixed the silent-PS1 race (device log 253-255): the
-	 * launcher's audio thread used to re-close the amp line ~2 ms after
-	 * this open, so pcsx4all exec'd with a physically muted speaker and
-	 * games like Worms Armageddon stayed totally silent.  Release our DAC
-	 * FIRST (the consumer thread deinits AUDDEC/I2SO on its own thread,
-	 * giving the audio daemon a clean handoff instead of a half-alive
-	 * stream), THEN open the amp line as the LAST audio action before
-	 * exec - nothing runs after this that could close it again. */
+	/* Let standalone apps initialize AUDDEC/I2SO after our audio thread has
+	 * released it. */
 	if (next_is_standalone && !next_is_video_player && !next_is_image_viewer) {
 		extern void sf3000_sound_release_for_exec(void);
 		sf3000_sound_release_for_exec();
-		extern void sf3000_sound_open_for_exec(void);
-		sf3000_sound_open_for_exec();
-		DBG("DBG quit: DAC released + speaker line opened for standalone app\n");
+		DBG("DBG quit: DAC released for standalone app\n");
 	}
 	/* Keep fb0/dis fds open across exec — closing them breaks the panel
 	 * state recovery (was working in commit 6537239). */
@@ -1377,16 +1359,10 @@ int quit(int code) {
 		}
 	}
 	/* A game hands off to FrogUI with exec(), so normal plat_finish() is not
-	 * reached.  Stop the game DAC before that handoff; FrogUI deliberately does
-	 * not initialise it, preventing idle hiss/static in the main menu. Also
-	 * close the amp line: the launcher mutes it on arrival anyway (see
-	 * plat_init), but this closes the window where the next process inherits
-	 * a live amp with no DAC owner. */
+	 * reached. Stop the game DAC before the launcher starts. */
 	{
 		extern void sf3000_sound_finish_for_exec(void);
-		extern void sf3000_sound_close_for_exec(void);
 		sf3000_sound_finish_for_exec();
-		sf3000_sound_close_for_exec();
 	}
 	DBG("DBG exec FrogUI fallback: bin=%s\n", PICOARCH_BIN);
 	execl(PICOARCH_BIN, "picoarch", FROGUI_CORE, FROGUI_CORE, NULL);
