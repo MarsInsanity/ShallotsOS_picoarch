@@ -84,11 +84,6 @@ static fn_enhance_t p_enhance = NULL;
 static int          g_sharpen = -1;   /* last sharpness pushed (0-10); -1 = unset */
 static int          g_panel_scale;
 static int          g_aspect_num, g_aspect_den;
-static int           g_fb0_fd = -1;
-static uint16_t     *g_fb0_mem;
-static size_t        g_fb0_size;
-static struct fb_fix_screeninfo g_fb0_fix;
-static int hwdisp_fb0_open(void);
 
 /* Plaintext stock driver setting layout, recovered from its format string and
  * video_driver_setting() stores: colour format, screen width/height, image
@@ -436,9 +431,6 @@ int hwdisp_init(void) {
     if (!sf3000_is_r36sx()) hwdisp_probe_hcfb_scale();
     g_sharpen = -1;   /* force re-apply on the next hwdisp_set_sharpen() */
     sf3000_dump_fb_state("hwdisp_init/post");
-    /* Keep R36SX at driver's 1280x720 scanout mode; disp_frame changes it to
-     * 640x480 and leaves the panel showing only a fraction of the image. */
-    if (sf3000_is_r36sx()) hwdisp_fb0_open();
     return 0;
 }
 
@@ -725,139 +717,11 @@ static uint16_t *prescale_int(const void *src, int w, int h, int pitch_bytes,
     return d;
 }
 
-static int hwdisp_fb0_open(void) {
-    struct fb_var_screeninfo v = {0};
-    g_fb0_fd = open("/dev/fb0", O_RDWR);
-    if (g_fb0_fd < 0 || ioctl(g_fb0_fd, FBIOGET_VSCREENINFO, &v) ||
-        ioctl(g_fb0_fd, FBIOGET_FSCREENINFO, &g_fb0_fix) || v.bits_per_pixel != 16 ||
-        !v.xres || !v.yres || g_fb0_fix.line_length < v.xres * 2 || !g_fb0_fix.smem_len) {
-        DBG("DBG fb0 direct: open/info failed errno=%d bpp=%u size=%ux%u\n",
-            errno, v.bits_per_pixel, v.xres, v.yres);
-        if (g_fb0_fd >= 0) close(g_fb0_fd);
-        g_fb0_fd = -1;
-        return 0;
-    }
-    g_fb0_size = g_fb0_fix.smem_len;
-    g_fb0_mem = mmap(NULL, g_fb0_size, PROT_READ|PROT_WRITE, MAP_SHARED, g_fb0_fd, 0);
-    if (g_fb0_mem == MAP_FAILED) {
-        DBG("DBG fb0 direct: mmap failed errno=%d\n", errno);
-        g_fb0_mem = NULL;
-        close(g_fb0_fd);
-        g_fb0_fd = -1;
-        return 0;
-    }
-    DBG("DBG fb0 direct: mapped %ux%u virtual=%ux%u stride=%u\n",
-        v.xres,v.yres,v.xres_virtual,v.yres_virtual,g_fb0_fix.line_length);
-    int pan = ioctl(g_fb0_fd, FBIOPAN_DISPLAY, &v);
-    int dis = open("/dev/dis", O_RDWR), route = -1;
-    if (dis >= 0) {
-        struct { int a, b, c; } args = {1, 0, 0};
-        route = ioctl(dis, 0xc00c0e0c, &args);
-        close(dis);
-    }
-    int blank = ioctl(g_fb0_fd, FBIOBLANK, 1);
-    int unblank = ioctl(g_fb0_fd, FBIOBLANK, 0);
-    DBG("DBG fb0 direct: relatch pan=%d route=%d blank=%d unblank=%d errno=%d\n",
-        pan, route, blank, unblank, errno);
-    return 1;
-}
-
-static int hwdisp_fb0_present(const void *src, int w, int h, int pitch_bytes) {
-    struct fb_var_screeninfo v;
-    size_t stride = g_fb0_fix.line_length / 2;
-    if (!g_fb0_mem || !src || w <= 0 || h <= 0 || pitch_bytes < w*2 ||
-        ioctl(g_fb0_fd, FBIOGET_VSCREENINFO, &v) || v.bits_per_pixel != 16 ||
-        v.xoffset + v.xres > v.xres_virtual || v.yoffset + v.yres > v.yres_virtual ||
-        (size_t)(v.yoffset + v.yres) * stride * 2 > g_fb0_size)
-        return 0;
-    static unsigned last_width, last_height;
-    if (v.xres != last_width || v.yres != last_height) {
-        DBG("DBG fb0 direct: active page xoff=%u yoff=%u viewport=%ux%u\n",
-            v.xoffset,v.yoffset,v.xres,v.yres);
-        last_width = v.xres;
-        last_height = v.yres;
-    }
-    unsigned active_y = v.yoffset;
-    unsigned draw_y = active_y == 0 ? v.yres : 0;
-    if (draw_y + v.yres > v.yres_virtual ||
-        (size_t)(draw_y + v.yres) * stride * 2 > g_fb0_size)
-        return 0;
-    uint16_t *dst = g_fb0_mem + (size_t)draw_y*stride + v.xoffset;
-    struct timeval stage_start, stage_end, pan_end;
-    gettimeofday(&stage_start, NULL);
-    if (w == (int)v.xres && h == (int)v.yres) {
-        for (unsigned y=0; y<v.yres; y++)
-            memcpy(dst + (size_t)y*stride,
-                   (const uint8_t *)src + (size_t)y*pitch_bytes, (size_t)w*2);
-    } else {
-        static unsigned *xmap;
-        static uint16_t *scaled_row;
-        static unsigned mapped_width, mapped_source_width, scaled_row_capacity;
-        if (mapped_width != v.xres || mapped_source_width != (unsigned)w) {
-            unsigned *map = realloc(xmap, (size_t)v.xres * sizeof(*map));
-            if (!map) return 0;
-            xmap = map;
-            for (unsigned x=0; x<v.xres; x++) xmap[x] = (size_t)x*w/v.xres;
-            mapped_width = v.xres;
-            mapped_source_width = w;
-        }
-        if (scaled_row_capacity < v.xres) {
-            uint16_t *row = realloc(scaled_row, (size_t)v.xres * sizeof(*row));
-            if (!row) return 0;
-            scaled_row = row;
-            scaled_row_capacity = v.xres;
-        }
-        unsigned previous_row = (unsigned)-1;
-        for (unsigned y=0; y<v.yres; y++) {
-            unsigned source_row = (size_t)y*h/v.yres;
-            const uint16_t *sr = (const uint16_t *)((const uint8_t *)src +
-                                      source_row*pitch_bytes);
-            uint16_t *dr = dst + (size_t)y*stride;
-            if (source_row != previous_row) {
-                for (unsigned x=0; x<v.xres; x++) scaled_row[x] = sr[xmap[x]];
-            }
-            memcpy(dr, scaled_row, (size_t)v.xres * sizeof(*dr));
-            previous_row = source_row;
-        }
-    }
-    gettimeofday(&stage_end, NULL);
-    v.yoffset = draw_y;
-    v.activate = FB_ACTIVATE_VBL;
-    int pan = ioctl(g_fb0_fd, FBIOPAN_DISPLAY, &v);
-    if (pan < 0) {
-        DBG("DBG fb0 direct: vblank pan yoff=%u failed errno=%d; retry immediate\n", draw_y, errno);
-        v.activate = FB_ACTIVATE_NOW;
-        pan = ioctl(g_fb0_fd, FBIOPAN_DISPLAY, &v);
-    }
-    gettimeofday(&pan_end, NULL);
-    static unsigned perf_frames;
-    static uint64_t scale_us, pan_us;
-    scale_us += ((uint64_t)stage_end.tv_sec * 1000000 + stage_end.tv_usec) -
-                ((uint64_t)stage_start.tv_sec * 1000000 + stage_start.tv_usec);
-    pan_us += ((uint64_t)pan_end.tv_sec * 1000000 + pan_end.tv_usec) -
-              ((uint64_t)stage_end.tv_sec * 1000000 + stage_end.tv_usec);
-    if (++perf_frames == 300) {
-        DBG("DBG fb0 perf: frames=%u scale_avg_us=%llu pan_avg_us=%llu\n", perf_frames,
-            (unsigned long long)(scale_us / perf_frames),
-            (unsigned long long)(pan_us / perf_frames));
-        perf_frames = 0;
-        scale_us = pan_us = 0;
-    }
-    static unsigned present_n;
-    if (present_n < 8)
-        DBG("DBG fb0 direct: pageflip n=%u old=%u new=%u pan=%d errno=%d\n",
-            ++present_n, active_y, draw_y, pan, errno);
-    return 1;
-}
-
 int hwdisp_present_direct(const void *src, int w, int h, int pitch_bytes) {
     static int s_n = 0;
     int lg = (s_n < 8);
     s_n++;
     if (!g_active || !src || !p_disp) return 0;
-    extern int sf3000_is_r36sx(void);
-    if (sf3000_is_r36sx() && g_fb0_mem)
-        return hwdisp_fb0_present(src, w, h, pitch_bytes);
     /* disp_frame HW-scales src→panel; the driver's fullscreen flag
      * (fbdev_video_aspect_ratio, like stock) picks fill vs aspect-fit. So:
      *   full   → flag=fill, pass src straight → GE distort-fills in HW (fast).
@@ -912,11 +776,7 @@ int hwdisp_present_direct(const void *src, int w, int h, int pitch_bytes) {
     }
 
     if (p_aspect && hw_scale) {
-        extern int sf3000_is_r36sx(void);
-        int native_panel_frame = sf3000_is_r36sx() && w == PANEL_PW && h == PANEL_PH;
-        /* R36SX source already matches its 640x480 panel; fit mode leaves the
-         * driver's bad viewport active, so send native-size frames as fill. */
-        int fit = integer_hw || (!native_panel_frame && g_panel_scale != 2);
+        int fit = integer_hw ? 0 : (g_panel_scale != 2);
         hwdisp_set_driver_fit(fit, 0);
     }
     /* disp_frame DMA-reads src asynchronously; handing it the caller's live
@@ -1142,8 +1002,6 @@ void hwdisp_deinit(void) {
      * current buffer while p_deinit switches routing back to fb0. */
     clear_fb0_for_shutdown();
     if (p_deinit) p_deinit();
-    if (g_fb0_mem) { munmap(g_fb0_mem, g_fb0_size); g_fb0_mem = NULL; }
-    if (g_fb0_fd >= 0) { close(g_fb0_fd); g_fb0_fd = -1; }
     sf3000_dump_fb_state("hwdisp_deinit/post-p_deinit");
     clear_fb0_for_shutdown();
     if (g_pad_buf) { free(g_pad_buf); g_pad_buf = NULL; g_pad_cap = 0; g_pad_w = 0; g_pad_h = 0; }
