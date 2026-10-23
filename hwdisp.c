@@ -770,11 +770,12 @@ static int hwdisp_fb0_present(const void *src, int w, int h, int pitch_bytes) {
         v.xoffset + v.xres > v.xres_virtual || v.yoffset + v.yres > v.yres_virtual ||
         (size_t)(v.yoffset + v.yres) * stride * 2 > g_fb0_size)
         return 0;
-    static unsigned last_yoffset = (unsigned)-1;
-    if (v.yoffset != last_yoffset) {
+    static unsigned last_width, last_height;
+    if (v.xres != last_width || v.yres != last_height) {
         DBG("DBG fb0 direct: active page xoff=%u yoff=%u viewport=%ux%u\n",
             v.xoffset,v.yoffset,v.xres,v.yres);
-        last_yoffset = v.yoffset;
+        last_width = v.xres;
+        last_height = v.yres;
     }
     unsigned active_y = v.yoffset;
     unsigned draw_y = active_y == 0 ? v.yres : 0;
@@ -782,18 +783,44 @@ static int hwdisp_fb0_present(const void *src, int w, int h, int pitch_bytes) {
         (size_t)(draw_y + v.yres) * stride * 2 > g_fb0_size)
         return 0;
     uint16_t *dst = g_fb0_mem + (size_t)draw_y*stride + v.xoffset;
+    struct timeval stage_start, stage_end, pan_end;
+    gettimeofday(&stage_start, NULL);
     if (w == (int)v.xres && h == (int)v.yres) {
         for (unsigned y=0; y<v.yres; y++)
             memcpy(dst + (size_t)y*stride,
                    (const uint8_t *)src + (size_t)y*pitch_bytes, (size_t)w*2);
     } else {
+        static unsigned *xmap;
+        static uint16_t *scaled_row;
+        static unsigned mapped_width, mapped_source_width, scaled_row_capacity;
+        if (mapped_width != v.xres || mapped_source_width != (unsigned)w) {
+            unsigned *map = realloc(xmap, (size_t)v.xres * sizeof(*map));
+            if (!map) return 0;
+            xmap = map;
+            for (unsigned x=0; x<v.xres; x++) xmap[x] = (size_t)x*w/v.xres;
+            mapped_width = v.xres;
+            mapped_source_width = w;
+        }
+        if (scaled_row_capacity < v.xres) {
+            uint16_t *row = realloc(scaled_row, (size_t)v.xres * sizeof(*row));
+            if (!row) return 0;
+            scaled_row = row;
+            scaled_row_capacity = v.xres;
+        }
+        unsigned previous_row = (unsigned)-1;
         for (unsigned y=0; y<v.yres; y++) {
+            unsigned source_row = (size_t)y*h/v.yres;
             const uint16_t *sr = (const uint16_t *)((const uint8_t *)src +
-                                      (size_t)y*h/v.yres*pitch_bytes);
+                                      source_row*pitch_bytes);
             uint16_t *dr = dst + (size_t)y*stride;
-            for (unsigned x=0; x<v.xres; x++) dr[x] = sr[(size_t)x*w/v.xres];
+            if (source_row != previous_row) {
+                for (unsigned x=0; x<v.xres; x++) scaled_row[x] = sr[xmap[x]];
+            }
+            memcpy(dr, scaled_row, (size_t)v.xres * sizeof(*dr));
+            previous_row = source_row;
         }
     }
+    gettimeofday(&stage_end, NULL);
     v.yoffset = draw_y;
     v.activate = FB_ACTIVATE_VBL;
     int pan = ioctl(g_fb0_fd, FBIOPAN_DISPLAY, &v);
@@ -801,6 +828,20 @@ static int hwdisp_fb0_present(const void *src, int w, int h, int pitch_bytes) {
         DBG("DBG fb0 direct: vblank pan yoff=%u failed errno=%d; retry immediate\n", draw_y, errno);
         v.activate = FB_ACTIVATE_NOW;
         pan = ioctl(g_fb0_fd, FBIOPAN_DISPLAY, &v);
+    }
+    gettimeofday(&pan_end, NULL);
+    static unsigned perf_frames;
+    static uint64_t scale_us, pan_us;
+    scale_us += ((uint64_t)stage_end.tv_sec * 1000000 + stage_end.tv_usec) -
+                ((uint64_t)stage_start.tv_sec * 1000000 + stage_start.tv_usec);
+    pan_us += ((uint64_t)pan_end.tv_sec * 1000000 + pan_end.tv_usec) -
+              ((uint64_t)stage_end.tv_sec * 1000000 + stage_end.tv_usec);
+    if (++perf_frames == 300) {
+        DBG("DBG fb0 perf: frames=%u scale_avg_us=%llu pan_avg_us=%llu\n", perf_frames,
+            (unsigned long long)(scale_us / perf_frames),
+            (unsigned long long)(pan_us / perf_frames));
+        perf_frames = 0;
+        scale_us = pan_us = 0;
     }
     static unsigned present_n;
     if (present_n < 8)

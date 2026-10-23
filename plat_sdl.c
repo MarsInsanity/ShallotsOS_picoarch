@@ -4,6 +4,7 @@
 #include <dlfcn.h>
 #include <dirent.h>
 #include <math.h>
+#include <time.h>
 #include "core.h"
 #include "libpicofe/fonts.h"
 #include "libpicofe/plat.h"
@@ -2328,30 +2329,41 @@ static inline uint32_t cvt565(uint16_t c) {
 void sf3000_frame_limit(void) {
     extern int g_ff_level;            /* 0=off,1=2x,2=3x,3=uncapped */
     extern double frame_rate;         /* core's native fps (retro_get_system_av_info) */
-    if (g_ff_level == 3) return;      /* uncapped: no pacing, run flat out */
+    static long long deadline_us, last_target;
+    static int last_ff = -1;
+    if (g_ff_level == 3) {
+        deadline_us = 0;
+        last_ff = 3;
+        return;                       /* uncapped: no pacing, run flat out */
+    }
     /* Pace to the CORE's frame rate, not a hardcoded 60 — cores whose native
      * rate isn't 60 (ecwolf 35fps, some arcade games) otherwise run too fast
      * (and their frame-time callback / audio desync from the mismatch). Falls
      * back to 60fps if the core hasn't reported a rate yet. */
     long long base = (frame_rate > 1.0) ? (long long)(1000000.0 / frame_rate) : 16666;
     long long target = base / (g_ff_level + 1);   /* pace emulation faster on FF */
-    static struct timeval last_tv = {0, 0};
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    if (last_tv.tv_sec != 0) {
-        long long diff_us = (tv.tv_sec - last_tv.tv_sec) * 1000000LL + (tv.tv_usec - last_tv.tv_usec);
-        if (diff_us > 0 && diff_us < target) {
-            long long sleep_us = target - diff_us;
-            if (sleep_us > 2000)
-                usleep(sleep_us - 2000);
-            while (1) {
-                gettimeofday(&tv, NULL);
-                diff_us = (tv.tv_sec - last_tv.tv_sec) * 1000000LL + (tv.tv_usec - last_tv.tv_usec);
-                if (diff_us >= target) break;
-            }
-        }
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    long long now_us = (long long)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+    if (!deadline_us || target != last_target || g_ff_level != last_ff ||
+        now_us - deadline_us > 250000) {
+        deadline_us = now_us;
+        last_target = target;
+        last_ff = g_ff_level;
+        return;
     }
-    last_tv = tv;
+    /* Advance the deadline instead of timing each call from its predecessor;
+     * overruns are recovered by later fast frames, up to a quarter-second. */
+    deadline_us += target;
+    if (now_us < deadline_us) {
+        long long sleep_us = deadline_us - now_us;
+        if (sleep_us > 2000)
+            usleep(sleep_us - 1000);
+        do {
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            now_us = (long long)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+        } while (now_us < deadline_us);
+    }
 }
 
 /* Runtime device detection — one SD image, N devices, profile chosen at boot.
