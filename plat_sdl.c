@@ -945,6 +945,30 @@ void plat_video_process(const void *data, unsigned width, unsigned height, size_
 	extern int current_pixel_format;
 	if (current_pixel_format != RETRO_PIXEL_FORMAT_XRGB8888) {
 		/* RGB565 / 0RGB1555: blit directly to fb0 (pitch may be wider than width*2). */
+		static unsigned pixel_probe_n;
+		if (width == 640 && height == 480 && pixel_probe_n < 4) {
+			const uint16_t *pixels = (const uint16_t *)data;
+			size_t stride = pitch / sizeof(uint16_t);
+			int min_x = 640, min_y = 480, max_x = -1, max_y = -1;
+			unsigned quadrants[4] = {0, 0, 0, 0};
+			for (unsigned y = 0; y < 480; ++y) {
+				for (unsigned x = 0; x < 640; ++x) {
+					if (pixels[(size_t)y * stride + x]) {
+						if ((int)x < min_x) min_x = x;
+						if ((int)x > max_x) max_x = x;
+						if ((int)y < min_y) min_y = y;
+						if ((int)y > max_y) max_y = y;
+						quadrants[(y >= 240) * 2 + (x >= 320)]++;
+					}
+				}
+			}
+			dbg_log("DBG pixel_probe n=%u fmt=%d size=%ux%u pitch=%zu nonzero=%d,%d-%d,%d quad=%u/%u/%u/%u corners=%04x/%04x/%04x/%04x\n",
+			        pixel_probe_n, current_pixel_format, width, height, pitch,
+			        min_x, min_y, max_x, max_y, quadrants[0], quadrants[1],
+			        quadrants[2], quadrants[3], pixels[0], pixels[639],
+			        pixels[(size_t)239 * stride], pixels[(size_t)479 * stride + 639]);
+			++pixel_probe_n;
+		}
 		g_game_w = (int)width; g_game_h = (int)height;
 		g_last565 = (const uint16_t *)data; g_last565_w = (int)width;
 		g_last565_h = (int)height; g_last565_pitch = (int)pitch;
