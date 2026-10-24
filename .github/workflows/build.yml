@@ -1,0 +1,71 @@
+name: Build picoarch
+
+# Cross-compiles picoarch and picoarch_hi for the SF3000-family devices
+# (R36SX, SF3000, GB350, ...) with the public SF3000 toolchain. The binaries
+# are uploaded as a workflow artifact; copy them to cubegm/ on the SD card.
+on:
+  push:
+    branches:
+      - 'claude/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TOOLCHAIN_URL: https://github.com/game-de-it/sf3000/releases/download/sf3000_toolchain_v0.1/mipsel-buildroot-linux-gnu_sdk-buildroot.tar.gz
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out picoarch
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # picoarch includes FrogUI's common/i18n.c from ../FrogUI/common.
+      - name: Check out FrogUI common code
+        uses: actions/checkout@v4
+        with:
+          repository: MarsInsanity/ShallotsOS
+          path: shallotsos
+          sparse-checkout: frogui/common
+
+      - name: Install the SF3000 toolchain
+        run: |
+          set -euo pipefail
+          root="$HOME/sf3000-work/sf3000toolchain"
+          mkdir -p "$root"
+          curl -fL --retry 4 -o "$RUNNER_TEMP/toolchain.tar.gz" "$TOOLCHAIN_URL"
+          tar -xzf "$RUNNER_TEMP/toolchain.tar.gz" -C "$root"
+          (cd "$root/mipsel-buildroot-linux-gnu_sdk-buildroot" && ./relocate-sdk.sh)
+
+      # The build scripts work in ~/sf3000-work/picoarch.
+      - name: Lay out the build tree
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/sf3000-work/FrogUI"
+          cp -a shallotsos/frogui/common "$HOME/sf3000-work/FrogUI/common"
+          rsync -a --exclude shallotsos ./ "$HOME/sf3000-work/picoarch/"
+
+      - name: Build picoarch
+        run: sh "$HOME/sf3000-work/picoarch/build_sf3000.sh"
+
+      - name: Build picoarch_hi
+        run: bash "$HOME/sf3000-work/picoarch/build_picoarch_hi.sh"
+
+      - name: Collect binaries
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/picoarch/cubegm"
+          mkdir -p "$out"
+          cp "$HOME/sf3000-work/picoarch/picoarch" "$HOME/sf3000-work/picoarch/picoarch_hi" "$out/"
+          file "$out"/*
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: picoarch
+          path: ${{ runner.temp }}/picoarch
+          if-no-files-found: error
