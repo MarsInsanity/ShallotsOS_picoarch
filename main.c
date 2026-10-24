@@ -177,6 +177,7 @@ static void load_frogui_settings(void) {
 	g_autosave_autoload = frogui_setting_is("autosave_autoload", "on");
 	g_stock_battery    = !frogui_setting_is("stock_battery", "off");
 	g_brightness       = frogui_setting_int("brightness", -1);   /* applied on game path only */
+	g_switcher_enabled = !frogui_setting_is("game_switcher", "off");
 	DBG("DBG load_frogui_settings: quick_resume=%d autosave_autoload=%d stock_battery=%d\n",
 	        g_quick_resume, g_autosave_autoload, g_stock_battery);
 }
@@ -202,6 +203,48 @@ static void clear_last_game(void) {
 	int r = unlink(LAST_GAME_FILE);
 	DBG("DBG clear_last_game: unlink ret=%d errno=%d\n", r, errno);
 	sync();
+}
+
+/* ---- GameSwitcher ---------------------------------------------------------
+ * Holding FN in a game suspends it into a hidden state slot (the menu shows
+ * slots 0-7 and Auto-Save/Auto-Load uses 9) and returns to FrogUI, which opens
+ * its GameSwitcher. Launching a suspended game resumes it once. Leaving a game
+ * any other way discards the suspend state, so it starts normally next time.
+ * SWITCHER_FLAG tells FrogUI that it was entered from a game. */
+#define SWITCHER_SLOT 10
+#define SWITCHER_FLAG "/tmp/shallotsos_from_game"
+int g_switcher_enabled = 1;      /* FrogUI's Game Switcher setting */
+int g_switcher_requested = 0;    /* set by the FN-hold hotkey in core.c */
+static int g_suspended = 0;      /* this game was suspended on the way out */
+static int g_resume_suspend = 0; /* this launch restores a suspend state */
+
+static void switcher_state_path(char *out, size_t size, const char *suffix) {
+	state_file_name(out, size, SWITCHER_SLOT);
+	if (suffix)
+		strncat(out, suffix, size - strlen(out) - 1);
+}
+
+static void switcher_discard(void) {
+	char path[MAX_PATH];
+	switcher_state_path(path, sizeof path, NULL);
+	unlink(path);
+	switcher_state_path(path, sizeof path, ".bmp");
+	unlink(path);
+}
+
+static void switcher_suspend(void) {
+	/* Entering the menu screen captures the live frame and refreshes the
+	 * GameSwitcher screenshot; the state write then dumps the same frame. */
+	plat_video_menu_enter(1);
+	int prev = state_slot;
+	state_slot = SWITCHER_SLOT;
+	g_suspended = state_allowed() && pa_state_write() == 0;
+	state_slot = prev;
+	plat_video_menu_leave();
+	sram_write();
+	sync();
+	DBG("DBG switcher: suspend state %s\n", g_suspended ? "saved" : "not saved");
+	should_quit = 1;
 }
 #endif
 
@@ -1184,7 +1227,21 @@ int main(int argc, char **argv) {
 	}
 #endif
 	show_startup_message();
-	state_resume();
+#ifdef PLATFORM_SF3000
+	if (!g_is_frogui) {
+		char suspend_path[MAX_PATH];
+		switcher_state_path(suspend_path, sizeof suspend_path, NULL);
+		if (access(suspend_path, F_OK) == 0) {
+			resume_slot = SWITCHER_SLOT;
+			g_resume_suspend = 1;
+			DBG("DBG switcher: resuming suspend state\n");
+		}
+	}
+#endif
+	/* Restore a few frames in rather than right after loading: some cores
+	 * (fake08) only start the cart on their first frame, which would replace
+	 * a state restored earlier. */
+	int resume_in_frames = resume_slot != -1 ? 3 : 0;
 #ifdef PLATFORM_SF3000
 	rewind_init();
 #endif
@@ -1214,6 +1271,22 @@ int main(int argc, char **argv) {
 		}
 #else
 		current_core.retro_run();
+#endif
+		if (resume_in_frames && --resume_in_frames == 0) {
+			int failed = state_resume();
+			DBG("DBG resume: slot state %s\n", failed ? "failed" : "restored");
+#ifdef PLATFORM_SF3000
+			if (g_resume_suspend) {
+				switcher_discard();   /* a suspend state resumes once */
+				g_resume_suspend = 0;
+			}
+#endif
+		}
+#ifdef PLATFORM_SF3000
+		if (g_switcher_requested && !should_quit) {
+			g_switcher_requested = 0;
+			switcher_suspend();
+		}
 #endif
 		if (!should_quit)
 			plat_video_flip();
@@ -1263,6 +1336,9 @@ int quit(int code) {
 		sync();
 		DBG("DBG quit: autosave_autoload final save to slot 99\n");
 	}
+	/* Leaving without holding FN: the game should start normally next time. */
+	if (!g_is_frogui && !g_suspended && content && current_core.retro_unload_game)
+		switcher_discard();
 #endif
 	core_unload();
 	/* Preserve and reveal cubevol's stock indicator across the exec back to FrogUI. */
@@ -1312,6 +1388,11 @@ int quit(int code) {
 	if (!core_path[0] && !rom_path[0]) {
 		clear_last_game();
 		DBG("DBG quit: cleared last_game marker (going to FrogUI)\n");
+		/* Tell FrogUI it is returning from a game (it opens the GameSwitcher). */
+		if (!g_is_frogui) {
+			FILE *flag = fopen(SWITCHER_FLAG, "w");
+			if (flag) fclose(flag);
+		}
 	}
 	/* WARM-BOOT marker: if we leave HCGE active, the next picoarch process
 	 * (same PPID = same icube shell child) early-inits hwdisp in

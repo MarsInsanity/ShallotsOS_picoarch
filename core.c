@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <fcntl.h>
+#include <time.h>
 #include <unistd.h>
 #include "cheat.h"
 #include "core.h"
@@ -620,6 +621,16 @@ static size_t pa_audio_sample_batch(const int16_t *data, size_t frames) {
 	return frames;
 }
 
+#ifdef PLATFORM_SF3000
+static long long mono_ms(void) {
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+#define FN_HOLD_MS 500   /* hold FN this long for the GameSwitcher */
+#define FN_RELEASE_POLLS 3 /* FN must read released this many polls in a row */
+#endif
+
 static void pa_input_poll(void) {
 	int actions[IN_BINDTYPE_COUNT] = { 0, };
 	in_update(actions);
@@ -634,7 +645,7 @@ static void pa_input_poll(void) {
 		uint32_t raw = sf3000_keys_filtered;  /* race-filtered (see plat_sdl.c) */
 		static uint32_t prev_raw = 0;   /* for rising-edge combo detection */
 
-		/* Hardware hotkeys: FN or SELECT+START = menu; SELECT+R2 save; SELECT+L2 load; SELECT+R1 fast-forward. */
+		/* Hardware hotkeys: FN tap or SELECT+START = menu, FN hold = GameSwitcher; SELECT+R2 save; SELECT+L2 load; SELECT+R1 fast-forward. */
 		const uint32_t SEL_BIT   = (1u << 0);   /* SELECT = bit 0  */
 		const uint32_t START_BIT = (1u << 3);   /* START  = bit 3  */
 		const uint32_t FN_BIT    = (1u << 16);  /* FN     = bit 16 */
@@ -666,7 +677,29 @@ static void pa_input_poll(void) {
 			buttons = sf3000_keys_to_buttons(raw);
 			goto frogui_no_hotkeys;
 		}
-		if (menu_armed && (((raw & (SEL_BIT | START_BIT)) == (SEL_BIT | START_BIT)) || (raw & FN_BIT))) {
+		/* FN: a tap opens the menu when released; holding it suspends the game
+		 * to FrogUI's GameSwitcher (when that setting is on). A short dropout
+		 * from the two-writer input race must not count as a release. */
+		extern int g_switcher_enabled, g_switcher_requested;
+		static long long fn_down_ms = -1;
+		static int fn_hold_fired = 0, fn_up_polls = 0;
+		int fn_tap = 0;
+		if (raw & FN_BIT) {
+			long long now = mono_ms();
+			fn_up_polls = 0;
+			if (fn_down_ms < 0) {
+				fn_down_ms = now;
+				fn_hold_fired = 0;
+			} else if (!fn_hold_fired && g_switcher_enabled &&
+			           now - fn_down_ms >= FN_HOLD_MS) {
+				fn_hold_fired = 1;
+				g_switcher_requested = 1;
+			}
+		} else if (fn_down_ms >= 0 && ++fn_up_polls >= FN_RELEASE_POLLS) {
+			fn_tap = !fn_hold_fired;
+			fn_down_ms = -1;
+		}
+		if (menu_armed && (((raw & (SEL_BIT | START_BIT)) == (SEL_BIT | START_BIT)) || fn_tap)) {
 			menu_armed = 0;
 			menu_off_cnt = 0;
 			handle_emu_action(EACTION_MENU);
