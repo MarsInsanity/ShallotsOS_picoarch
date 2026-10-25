@@ -1334,6 +1334,13 @@ static void keys_draw_miyoo(const struct me_bind_action *opts_, int opt_cnt, int
 		if (on)
 			minui_fill(0, y, W, rh, ACCENT);
 		const char *bind = action_binds(player_idx, opts[i].mask, dev_id);
+		if (player_idx < 0 && (!bind || !bind[0])) {
+			/* Built into ShallotsOS (core.c), so there is no bind to show. */
+			if (opts[i].mask == 1 << EACTION_SAVE_STATE) bind = "SELECT+R2";
+			else if (opts[i].mask == 1 << EACTION_LOAD_STATE) bind = "SELECT+L2";
+			else if (opts[i].mask == 1 << EACTION_TOGGLE_FF) bind = "SELECT+R1";
+		}
+		if (!bind) bind = "";
 		int bw = menu_font_measure(bind);
 		minui_text_mid(pad, y + rh / 2, localized_action_name(opts[i].name), tc);
 		minui_text_mid(W - pad - bw, y + rh / 2, bind, on ? tc : DIM);
