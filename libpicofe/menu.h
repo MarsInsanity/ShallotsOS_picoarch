@@ -11,6 +11,8 @@
 #ifndef LIBPICOFE_MENU_H
 #define LIBPICOFE_MENU_H
 
+#include "pill_animation.h"
+
 typedef enum
 {
 	MB_NONE = 1,		/* no auto processing */
@@ -21,6 +23,10 @@ typedef enum
 	MB_OPT_CUSTRANGE,
 	MB_OPT_ENUM,
 } menu_behavior;
+
+int menu_selection_animate(int target_y);
+int menu_selection_animating(void);
+void menu_selection_reset(void);
 
 typedef struct
 {

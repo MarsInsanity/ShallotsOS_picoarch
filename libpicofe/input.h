@@ -134,6 +134,7 @@ int  in_update_analog(int dev_id, int axis_id, int *value);
 int  in_update_keycode(int *dev_id, int *is_down, char *charcode, int timeout_ms);
 int  in_menu_wait_any(char *charcode, int timeout_ms);
 int  in_menu_wait(int interesting, char *charcode, int autorep_delay_ms);
+void in_menu_wait_set_idle_callback(void (*callback)(void *), void *data);
 int  in_config_parse_dev(const char *dev_name);
 int  in_config_bind_key(int dev_id, const char *key, int binds, int bind_type);
 int  in_get_config(int dev_id, int what, void *val);

@@ -301,19 +301,42 @@ static void menu_round_fill(int x, int y, int w, int h, int r, unsigned short c)
 	}
 }
 
+static pill_animation selection_animation;
+static int selection_animation_initialized;
+
+int menu_selection_animate(int target_y)
+{
+	if (!selection_animation_initialized) {
+		pill_animation_reset(&selection_animation, target_y);
+		selection_animation_initialized = 1;
+	} else if (selection_animation.to_y != target_y) {
+		pill_animation_start(&selection_animation, selection_animation.current_y,
+		                     target_y, 3);
+	}
+	return pill_animation_step(&selection_animation);
+}
+
+int menu_selection_animating(void)
+{
+	return selection_animation_initialized && pill_animation_active(&selection_animation);
+}
+
+void menu_selection_reset(void)
+{
+	selection_animation_initialized = 0;
+}
+
 static void menu_draw_selection(int x, int y, int w)
 {
 	int i, h;
 	unsigned short *dst, *dest;
+	y = menu_selection_animate(y);
 
-	/* TTF look: white rounded pill (FrogUI select_bg). Selected text is drawn
-	 * black by me_draw. The passed width `w` is computed from the bitmap font
-	 * (8px/char) and is too narrow for proportional TTF glyphs — long entries
-	 * would overflow the pill and render black-on-dark (invisible). Extend the
-	 * pill to the screen edge so any entry stays on the white. */
+	/* The TTF caller passes a width measured from the selected row's text. */
 	if (menu_font_ready()) {
-		int pw = g_menuscreen_w - x - 4;
-		if (pw < w) pw = w;
+		int pw = w;
+		if (x + pw > g_menuscreen_w - 4)
+			pw = g_menuscreen_w - x - 4;
 		/* Stay within this row's own [y, y+me_mfont_h) band - a y-2 start
 		 * with the same height bled 2px into the row above, wiping thin
 		 * glyph strokes (e.g. "I") there when this row became selected. */
@@ -334,6 +357,56 @@ static void menu_draw_selection(int x, int y, int w)
 			*dst++ = menu_sel_color;
 		dest += g_menuscreen_pp;
 	}
+}
+
+static unsigned int me_read_onoff(const menu_entry *ent);
+
+static int menu_ttf_selection_width(const menu_entry *ent, int x, int col2_offs)
+{
+	const char *label = ent->name, *value = NULL;
+	int offs = 0, right, text_x = x + me_mfont_w * 2;
+	if (!*label && ent->generate_name)
+		label = ent->generate_name(ent->id, &offs);
+	right = text_x + menu_font_measure(label ? label : "");
+	switch (ent->beh) {
+	case MB_OPT_ONOFF:
+		value = me_read_onoff(ent) ? "ON" : "OFF";
+		right = text_x + col2_offs + menu_font_measure(value);
+		break;
+	case MB_OPT_RANGE: {
+		char buf[16];
+		snprintf(buf, sizeof(buf), "%i", *(int *)ent->var);
+		right = text_x + col2_offs + (3 - (int)strlen(buf)) * me_mfont_w +
+			menu_font_measure(buf);
+		break;
+	}
+	case MB_OPT_CUSTOM:
+	case MB_OPT_CUSTONOFF:
+	case MB_OPT_CUSTRANGE:
+		if (ent->generate_name) value = ent->generate_name(ent->id, &offs);
+		if (value)
+			right = text_x + col2_offs + offs * me_mfont_w + menu_font_measure(value);
+		break;
+	case MB_OPT_ENUM: {
+		const char **names = (const char **)ent->data;
+		int idx = *(unsigned char *)ent->var;
+		for (int i = 0; names && names[i]; i++) {
+			if (i == idx) {
+				int value_x = text_x + col2_offs;
+				int len = strlen(names[i]);
+				if (len > 10) value_x += (10 - len - 2) * me_mfont_w;
+				int label_end = text_x + (strlen(label ? label : "") + 1) * me_mfont_w;
+				if (value_x < label_end) value_x = label_end;
+				right = value_x + menu_font_measure(names[i]);
+				break;
+			}
+		}
+		break;
+	}
+	default:
+		break;
+	}
+	return right - (text_x - 6) + 6;
 }
 
 static int parse_hex_color(char *buff)
@@ -798,7 +871,13 @@ static void me_draw(const menu_entry *entries, int sel, void (*draw_more)(void))
 
 	/* draw */
 	menu_draw_begin(1, 0);
-	menu_draw_selection(x, y + vi_sel_ln * me_mfont_h, w);
+	if (menu_font_ready()) {
+		int pill_x = x + me_mfont_w * 2 - 6;
+		menu_draw_selection(pill_x, y + vi_sel_ln * me_mfont_h,
+			menu_ttf_selection_width(ent_sel, x, col2_offs));
+	} else {
+		menu_draw_selection(x, y + vi_sel_ln * me_mfont_h, w);
+	}
 	x += me_mfont_w * 2;
 
 	for (ent = entries; ent->name; ent++)
@@ -940,6 +1019,7 @@ static void debug_menu_loop(void);
 static int me_loop_d(menu_entry *menu, int *menu_sel, void (*draw_prep)(void), void (*draw_more)(void))
 {
 	int ret = 0, inp, sel = *menu_sel, menu_sel_max;
+	menu_selection_reset();
 
 	menu_sel_max = me_count(menu) - 1;
 	if (menu_sel_max < 0) {
@@ -956,12 +1036,16 @@ static int me_loop_d(menu_entry *menu, int *menu_sel, void (*draw_prep)(void), v
 
 	for (;;)
 	{
-		if (draw_prep != NULL)
-			draw_prep();
-
-		me_draw(menu, sel, draw_more);
+		do {
+			if (draw_prep != NULL)
+				draw_prep();
+			me_draw(menu, sel, draw_more);
+			if (menu_selection_animating())
+				plat_sleep_ms(16);
+		} while (menu_selection_animating());
 		inp = in_menu_wait(PBTN_UP|PBTN_DOWN|PBTN_LEFT|PBTN_RIGHT|
-			PBTN_MOK|PBTN_MBACK|PBTN_MENU|PBTN_L|PBTN_R, NULL, 70);
+			PBTN_MOK|PBTN_MBACK|PBTN_MENU|PBTN_L|PBTN_R, NULL,
+			70);
 		if (inp & (PBTN_MENU|PBTN_MBACK))
 			break;
 
@@ -998,6 +1082,7 @@ static int me_loop_d(menu_entry *menu, int *menu_sel, void (*draw_prep)(void), v
 			if (menu[sel].handler != NULL && (menu[sel].beh != MB_NONE || (inp & PBTN_MOK))) {
 				ret = menu[sel].handler(menu[sel].id, inp);
 				if (ret) break;
+				menu_selection_reset(); /* a nested menu may have used the shared pill state */
 				menu_sel_max = me_count(menu) - 1; /* might change, so update */
 			}
 		}
@@ -1513,7 +1598,8 @@ static void draw_savestate_menu(int menu_sel, int is_loading)
 			if (state_slot_times[i]) { time_t t = state_slot_times[i]; strftime(tb, sizeof(tb), "%x %R", localtime(&t)); }
 			snprintf(buf, sizeof(buf), "Slot %d  -  %s", i + 1, tb);
 		}
-		if (i == menu_sel) menu_round_fill(pad - 6, y, barw, rh, rh / 4, WHITE);
+		if (i == menu_sel)
+			menu_round_fill(pad - 6, menu_selection_animate(y), barw, rh, rh / 4, WHITE);
 		menu_font_draw_text((uint16_t *)g_menuscreen_ptr, W, H, pad, y + tdy, buf,
 		                    (i == menu_sel) ? DARK : WHITE);
 	}
@@ -1531,6 +1617,7 @@ static int menu_loop_savestate(int is_loading)
 	int menu_sel_max = STATE_SLOT_COUNT;
 	unsigned long inp = 0;
 	int ret = 0;
+	menu_selection_reset();
 
 	state_check_slots();
 
@@ -1554,7 +1641,11 @@ static int menu_loop_savestate(int is_loading)
 
 	for (;;)
 	{
-		draw_savestate_menu(menu_sel, is_loading);
+		do {
+			draw_savestate_menu(menu_sel, is_loading);
+			if (menu_selection_animating())
+				plat_sleep_ms(16);
+		} while (menu_selection_animating());
 		inp = in_menu_wait(PBTN_UP|PBTN_DOWN|PBTN_MOK|PBTN_MBACK, NULL, 100);
 		if (inp & PBTN_UP) {
 			do {
@@ -1700,8 +1791,17 @@ static void draw_key_config(const me_bind_action *opts, int opt_cnt, int player_
 			first + 1, first + visible, opt_cnt);
 
 	y += 2 * me_mfont_h;
-	menu_draw_selection(x - me_mfont_w * 2,
-		y + (sel - first) * me_mfont_h, w + 2 * me_mfont_w);
+	if (menu_font_ready()) {
+		const char *label = localized_action_name(opts[sel].name);
+		const char *binding = action_binds(player_idx, opts[sel].mask, dev_id);
+		int pill_x = x - 6;
+		int pill_w = menu_font_measure(label) + menu_font_measure(" : ") +
+			menu_font_measure(binding) + 12;
+		menu_draw_selection(pill_x, y + (sel - first) * me_mfont_h, pill_w);
+	} else {
+		menu_draw_selection(x - me_mfont_w * 2,
+			y + (sel - first) * me_mfont_h, w + 2 * me_mfont_w);
+	}
 
 	for (i = first; i < first + visible; i++, y += me_mfont_h) {
 		int sel_row = menu_font_ready() && (i == sel);
@@ -1748,6 +1848,7 @@ static void key_config_loop(const me_bind_action *opts, int opt_cnt, int player_
 	int i, sel = 0, menu_sel_max = opt_cnt - 1, does_combos = 0;
 	int dev_id, bind_dev_id, dev_count, kc, is_down, mkey;
 	int unbind, bindtype, mask_shift;
+	menu_selection_reset();
 
 	for (i = 0, dev_id = -1, dev_count = 0; i < IN_MAX_DEVS; i++) {
 		if (in_get_dev_name(i, 1, 0) != NULL) {
@@ -1770,7 +1871,11 @@ static void key_config_loop(const me_bind_action *opts, int opt_cnt, int player_
 
 	for (;;)
 	{
-		draw_key_config(opts, opt_cnt, player_idx, sel, dev_id, dev_count, 0);
+		do {
+			draw_key_config(opts, opt_cnt, player_idx, sel, dev_id, dev_count, 0);
+			if (menu_selection_animating())
+				plat_sleep_ms(16);
+		} while (menu_selection_animating());
 		mkey = in_menu_wait(PBTN_UP|PBTN_DOWN|PBTN_LEFT|PBTN_RIGHT
 				|PBTN_MBACK|PBTN_MOK|PBTN_MA2, NULL, 100);
 		switch (mkey) {
