@@ -24,13 +24,15 @@ jobs:
         with:
           submodules: recursive
 
-      # picoarch includes FrogUI's common/i18n.c from ../FrogUI/common.
+      # picoarch includes FrogUI's common/i18n.c from ../FrogUI/common. Pin
+      # the upstream commit ShallotsOS vendored, which has the same code.
       - name: Check out FrogUI common code
         uses: actions/checkout@v4
         with:
-          repository: MarsInsanity/ShallotsOS
-          path: shallotsos
-          sparse-checkout: frogui/common
+          repository: tzubertowski/FrogUI
+          ref: 433448bcb3009895265f4a019511f0e7b4e3ab49
+          path: frogui-upstream
+          sparse-checkout: common
 
       - name: Install the SF3000 toolchain
         run: |
@@ -46,8 +48,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$HOME/sf3000-work/FrogUI"
-          cp -a shallotsos/frogui/common "$HOME/sf3000-work/FrogUI/common"
-          rsync -a --exclude shallotsos ./ "$HOME/sf3000-work/picoarch/"
+          cp -a frogui-upstream/common "$HOME/sf3000-work/FrogUI/common"
+          rsync -a --exclude frogui-upstream ./ "$HOME/sf3000-work/picoarch/"
 
       - name: Build picoarch
         run: sh "$HOME/sf3000-work/picoarch/build_sf3000.sh"
