@@ -40,6 +40,7 @@ static const char *picoarch_for_core(const char *core) {
 #include "libpicofe/input.h"
 #include "main.h"
 #include "menu.h"
+#include "menu_font.h"
 #include "overrides.h"
 #include "plat.h"
 #include "util.h"
@@ -396,6 +397,7 @@ static void power_watch(const char *rom) {
 /* Why the console powered itself off, shown after the next boot: by the
  * resumed game (main loop), or by FrogUI's menu when nothing resumes. */
 #define POWEROFF_NOTE_FILE "/mnt/sdcard/picoarch/poweroff_note.txt"
+static int fb1_toast(const char *text, int msec);   /* OSD-plane toast, below */
 
 static void write_poweroff_note(const char *text) {
 	FILE *f = fopen(POWEROFF_NOTE_FILE, "w");
@@ -449,7 +451,8 @@ static void low_battery_watch(const char *rom) {
 	if (now - low_since < LOW_BATTERY_MS)
 		return;
 	if (power_gpio && access(SHUTDOWN_SCRIPT, X_OK) == 0) {
-		plat_video_set_msg("Battery low: saving and shutting down", 1, 5000);
+		if (!fb1_toast("Battery low: saving and shutting down", 5000))
+			plat_video_set_msg("Battery low: saving and shutting down", 1, 5000);
 		write_poweroff_note("Powered off: battery low");
 		power_suspend(rom);
 		power_saved = 1;
@@ -463,7 +466,8 @@ static void low_battery_watch(const char *rom) {
 		power_suspend(rom);
 		power_saved = 1;
 		last_save = now;
-		plat_video_set_msg("Battery low: game saved", 1, 3000);
+		if (!fb1_toast("Battery low: game saved", 3000))
+			plat_video_set_msg("Battery low: game saved", 1, 3000);
 		DBG("DBG power: battery %d%%, game saved\n", pct);
 	}
 }
@@ -885,6 +889,104 @@ static void fb1_clear(void) {
 	}
 	if (mem) memset(mem, 0, len);
 }
+/* ---- Toast on the OSD plane ---------------------------------------------------
+ * Short messages in a game (such as why the console powered off) are drawn
+ * on cubevol's OSD plane, /dev/fb1, which sits above the game at the panel's
+ * resolution: the HUD message is drawn into the game's own small frame and
+ * gets scaled and cropped. Same look as FrogUI's OnionOS toast: a dark
+ * rounded card above the bottom edge, in the menu's TTF font. Needs a 32-bit
+ * landscape plane; returns 0 otherwise so the caller can use the HUD. */
+static long long toast_until;
+static int toast_x, toast_y, toast_w, toast_h;   /* where it is on fb1 */
+static void fb1_set_visible(int visible);
+
+static long long toast_now_ms(void) {
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+static int fb1_toast(const char *text, int msec) {
+	if (!text || !*text || !menu_font_ready())
+		return 0;
+	int fd = open("/dev/fb1", O_RDWR);
+	if (fd < 0)
+		return 0;
+	struct fb_var_screeninfo vinfo;
+	struct fb_fix_screeninfo finfo;
+	if (ioctl(fd, FBIOGET_VSCREENINFO, &vinfo) != 0 || ioctl(fd, FBIOGET_FSCREENINFO, &finfo) != 0 ||
+	    vinfo.bits_per_pixel != 32 || vinfo.xres < vinfo.yres || vinfo.xres > 1920) {
+		close(fd);
+		return 0;
+	}
+	uint8_t *mem = mmap(NULL, finfo.smem_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (mem == MAP_FAILED) {
+		close(fd);
+		return 0;
+	}
+	int W = vinfo.xres, H = vinfo.yres;
+	menu_font_set_px(22.0f);
+	int tw = menu_font_measure(text);
+	int bw = tw + 40, bh = 44;
+	if (bw > W - 20) bw = W - 20;
+	int bx = (W - bw) / 2, by = H - 60 - 12 - bh;
+	/* Draw the text into a small RGB565 card, then copy it to the plane. */
+	uint16_t *card = calloc((size_t)bw * bh, sizeof *card);
+	if (card) {
+		int baseline, cap;
+		menu_font_cap_metrics(&baseline, &cap);
+		menu_font_draw_text(card, bw, bh, (bw - tw) / 2 > 4 ? (bw - tw) / 2 : 4,
+		                    bh / 2 - (baseline - cap / 2), text, 0xFFFF);
+		const int r = 12;
+		for (int y = 0; y < bh; y++) {
+			uint32_t *row = (uint32_t *)(mem + (size_t)(by + y) * finfo.line_length) + bx;
+			for (int x = 0; x < bw; x++) {
+				int dx = x < r ? r - x : (x >= bw - r ? x - (bw - r - 1) : 0);
+				int dy = y < r ? r - y : (y >= bh - r ? y - (bh - r - 1) : 0);
+				if (dx * dx + dy * dy > r * r) {
+					row[x] = 0;
+					continue;
+				}
+				uint16_t c = card[y * bw + x];
+				uint32_t rr = (c >> 11) * 255 / 31, gg = ((c >> 5) & 63) * 255 / 63, b = (c & 31) * 255 / 31;
+				/* Text pixels opaque, the card itself ~80% black. */
+				row[x] = c ? (0xFFu << 24) | (rr << 16) | (gg << 8) | b : 0xD2000000u;
+			}
+		}
+		free(card);
+	}
+	munmap(mem, finfo.smem_len);
+	ioctl(fd, FBIOBLANK, FB_BLANK_UNBLANK);
+	close(fd);
+	toast_until = toast_now_ms() + msec;
+	toast_x = bx; toast_y = by; toast_w = bw; toast_h = bh;
+	return card != NULL;
+}
+
+/* Clears the toast once it has expired (called every frame). */
+static void fb1_toast_tick(void) {
+	if (!toast_until || toast_now_ms() < toast_until)
+		return;
+	toast_until = 0;
+	/* Clear only the card: cubevol redraws its own OSD only on a change. */
+	int fd = open("/dev/fb1", O_RDWR);
+	if (fd >= 0) {
+		struct fb_fix_screeninfo finfo;
+		if (ioctl(fd, FBIOGET_FSCREENINFO, &finfo) == 0) {
+			uint8_t *mem = mmap(NULL, finfo.smem_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+			if (mem != MAP_FAILED) {
+				for (int y = 0; y < toast_h; y++)
+					memset(mem + (size_t)(toast_y + y) * finfo.line_length + (size_t)toast_x * 4, 0,
+					       (size_t)toast_w * 4);
+				munmap(mem, finfo.smem_len);
+			}
+		}
+		close(fd);
+	}
+	if (g_stock_battery)
+		fb1_set_visible(0);   /* the game hides the stock indicator */
+}
+
 static void fb1_set_visible(int visible) {
 	int fd = open("/dev/fb1", O_RDWR);
 	if (fd < 0) return;
@@ -1859,7 +1961,8 @@ int main(int argc, char **argv) {
 				g_resume_suspend = 0;
 				if (!failed && read_poweroff_note(note, sizeof note - 16)) {
 					strcat(note, ", game resumed");
-					plat_video_set_msg(note, 1, 4000);
+					if (!fb1_toast(note, 4000))
+						plat_video_set_msg(note, 1, 4000);
 				}
 			}
 #endif
@@ -1896,6 +1999,7 @@ int main(int argc, char **argv) {
 			if ((++fb1_fc % 3600) == 0) fb1_clear();
 		}
 		sleep_watch();
+		fb1_toast_tick();
 #endif
 	} while (!should_quit);
 
