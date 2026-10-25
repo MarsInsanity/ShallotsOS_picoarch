@@ -686,10 +686,13 @@ static void pa_input_poll(void) {
 		 * volume or backlight changed, is a combo and does neither. */
 		extern int g_switcher_enabled, g_switcher_requested;
 		extern int sf3000_fn_combo_probe(void);
+		extern int g_game_keys;   /* FrogUI "In-game Menu Keys", see below */
 		static long long fn_down_ms = -1, fn_probe_ms = 0;
 		static int fn_hold_fired = 0, fn_up_polls = 0, fn_combo = 0, fn_sig = -1;
 		int fn_tap = 0;
-		if (raw & FN_BIT) {
+		if (g_game_keys != 0) {
+			fn_down_ms = -1;   /* FN is left to the system shortcuts */
+		} else if (raw & FN_BIT) {
 			long long now = mono_ms();
 			fn_up_polls = 0;
 			if (fn_down_ms < 0) {
@@ -717,13 +720,16 @@ static void pa_input_poll(void) {
 			fn_tap = !fn_hold_fired && !fn_combo;
 			fn_down_ms = -1;
 		}
-		/* FrogUI's "In-game Menu Keys" setting adds a second way in, next to
-		 * FN. 1: hold SELECT for the menu or START for the GameSwitcher, on
-		 * its own (any other button makes it a combo, such as SELECT+R2);
-		 * taps still reach the game. 2: SELECT+L1 opens the GameSwitcher
-		 * (SELECT+START opens the menu in every mode). */
-		extern int g_game_keys;
-		const uint32_t L1_BIT = (1u << 10);  /* L1 = bit 10 */
+		/* FrogUI's "In-game Menu Keys" setting picks ONE way in:
+		 * 0: FN - tap = menu, hold = GameSwitcher (and SELECT+START = menu,
+		 *    the original default);
+		 * 1: hold SELECT = menu, hold START = GameSwitcher, each on its own
+		 *    (any other button makes it a combo, such as SELECT+R2); taps
+		 *    still reach the game;
+		 * 2: SELECT+START - tap = menu, hold = GameSwitcher. The pair is kept
+		 *    from the game while held (PCE soft-resets on Run+Select).
+		 * (SELECT+L1 is the screenshot shortcut in plat_sdl.c.) */
+		const int both = (raw & (SEL_BIT | START_BIT)) == (SEL_BIT | START_BIT);
 		static long long hold_down_ms = -1;
 		static uint32_t hold_bit = 0;
 		static int hold_used = 0, hold_up_polls = FN_RELEASE_POLLS;
@@ -755,10 +761,26 @@ static void pa_input_poll(void) {
 					hold_up_polls = 0;
 				}
 			}
-		} else if (g_game_keys == 2 && g_switcher_enabled && COMBO_EDGE(SEL_BIT | L1_BIT)) {
-			g_switcher_requested = 1;
+		} else if (g_game_keys == 2) {
+			static long long pair_down_ms = -1;
+			static int pair_fired = 0, pair_up_polls = 0;
+			if (both) {
+				long long now = mono_ms();
+				pair_up_polls = 0;
+				suppress_menu_buttons = 1;
+				if (pair_down_ms < 0) {
+					pair_down_ms = now;
+					pair_fired = 0;
+				} else if (!pair_fired && g_switcher_enabled && now - pair_down_ms >= FN_HOLD_MS) {
+					pair_fired = 1;
+					g_switcher_requested = 1;
+				}
+			} else if (pair_down_ms >= 0 && ++pair_up_polls >= FN_RELEASE_POLLS) {
+				hold_menu = !pair_fired;
+				pair_down_ms = -1;
+			}
 		}
-		if (menu_armed && (((raw & (SEL_BIT | START_BIT)) == (SEL_BIT | START_BIT)) || fn_tap || hold_menu)) {
+		if (menu_armed && ((g_game_keys == 0 && both) || fn_tap || hold_menu)) {
 			menu_armed = 0;
 			menu_off_cnt = 0;
 			handle_emu_action(EACTION_MENU);
