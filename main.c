@@ -731,6 +731,77 @@ static void fb1_menu_exit(void) {
 	if (g_stock_battery) fb1_set_visible(0);
 }
 
+#ifdef PLATFORM_SF3000
+/* ---- Waking from sleep -------------------------------------------------------
+ * A short press of power puts the console to sleep (cubevol). Waking undoes
+ * what the game set up: cubevol shows its OSD plane again (the stock battery
+ * icon stays over the game) and the CPU comes back on the stock frequency
+ * policy instead of zhijack's full speed, which makes games lag. Spot a wake
+ * from the clocks - CLOCK_BOOTTIME runs through suspend, CLOCK_MONOTONIC
+ * doesn't - or from a long pause between frames, and set both up again.
+ * The CPU policy is also checked every few seconds in case a wake is missed. */
+static void cpu_full_speed(void) {
+	for (int i = 0; i < 4; i++) {
+		char path[96], max[32] = "";
+		snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_governor", i);
+		FILE *f = fopen(path, "w");
+		if (!f)
+			continue;
+		fputs("performance", f);
+		fclose(f);
+		snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", i);
+		if ((f = fopen(path, "r"))) {
+			if (!fgets(max, sizeof max, f))
+				max[0] = '\0';
+			fclose(f);
+		}
+		snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_min_freq", i);
+		if (max[0] && (f = fopen(path, "w"))) {
+			fputs(max, f);
+			fclose(f);
+		}
+	}
+}
+
+static int cpu_at_full_speed(void) {
+	char gov[32] = "";
+	FILE *f = fopen("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", "r");
+	if (!f)
+		return 1;   /* nothing to manage */
+	if (!fgets(gov, sizeof gov, f))
+		gov[0] = '\0';
+	fclose(f);
+	return strncmp(gov, "performance", 11) == 0;
+}
+
+static void sleep_watch(void) {
+	static long long last_mono = -1, last_gap = 0;
+	static unsigned frames;
+	if ((++frames % 30) != 0)
+		return;
+	struct timespec m, b;
+	clock_gettime(CLOCK_MONOTONIC, &m);
+	clock_gettime(CLOCK_BOOTTIME, &b);
+	long long mono = (long long)m.tv_sec * 1000 + m.tv_nsec / 1000000;
+	long long gap = (long long)b.tv_sec * 1000 + b.tv_nsec / 1000000 - mono;
+	int woke = last_mono >= 0 && (mono - last_mono > 3000 || gap - last_gap > 1000);
+	last_mono = mono;
+	last_gap = gap;
+	if (!woke && (frames % 300) == 0 && !cpu_at_full_speed())
+		woke = 1;
+	if (!woke)
+		return;
+	DBG("DBG sleep: woke up, restoring CPU speed and the OSD plane\n");
+	cpu_full_speed();
+	if (g_is_frogui)
+		return;   /* the launcher shows the OSD plane anyway */
+	if (g_stock_battery) fb1_set_visible(0);
+	else fb1_clear();
+	plat_sound_pause_for_menu();   /* drop audio queued around the sleep */
+	plat_sound_resume_from_menu();
+}
+#endif
+
 void set_defaults(void)
 {
 	show_fps = 0;
@@ -1510,6 +1581,7 @@ int main(int argc, char **argv) {
 			static unsigned fb1_fc = 0;
 			if ((++fb1_fc % 3600) == 0) fb1_clear();
 		}
+		sleep_watch();
 #endif
 	} while (!should_quit);
 
