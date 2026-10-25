@@ -645,6 +645,13 @@ static void power_resume_redirect(void) {
 	if (access(core, F_OK) != 0 || access(rom, F_OK) != 0)
 		return;
 	DBG("DBG power: resuming %s after power-off\n", rom);
+	/* A standalone emulator (PCSX4ALL) saved itself: start it directly; it
+	 * finds its own resume marker. Nothing is set up yet at this point. */
+	size_t cl = strlen(core);
+	if (cl < 3 || strcmp(core + cl - 3, ".so") != 0) {
+		chmod(core, 0755);
+		execl(core, core, rom, NULL);
+	}
 	execl(picoarch_for_core(core), "picoarch", core, rom, NULL);
 }
 #endif
