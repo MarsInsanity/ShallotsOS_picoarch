@@ -83,15 +83,18 @@ int menu_sel_text_color = 0x0000; // selected-row text (default black on pill)
 static const int me_mfont_w = 16, me_mfont_h = 20;
 static const int me_sfont_w = 12, me_sfont_h = 20;
 #else
-/* The picoarch menu renders at a fixed 320x240 buffer that is then HW-upscaled
- * ~2x to the panel, so menu px ≈ half of the on-panel size. These match FrogUI's
- * ~30px font / 36px rows after upscale. Bitmap font is fallback only. */
-static const int me_mfont_w = 8, me_mfont_h = 18;
-static const int me_sfont_w = 6, me_sfont_h = 12;
+/* Sizes are for a 320x240 menu; MENU_K scales them when the menu is drawn
+ * at the panel's own resolution (SF3000 builds: 640x480 or 854x480, so 2).
+ * Bitmap font is fallback only. */
+#define MENU_K (g_menuscreen_h >= 480 ? 2 : 1)
+#define me_mfont_w (8 * MENU_K)
+#define me_mfont_h (18 * MENU_K)
+#define me_sfont_w (6 * MENU_K)
+#define me_sfont_h (12 * MENU_K)
 #endif
 
-/* Menu TTF size in the 320x240 buffer (≈ FrogUI 30px after the ~2x upscale). */
-#define MENU_TTF_PX 14
+/* Menu TTF size (≈ FrogUI 30px on the panel). */
+#define MENU_TTF_PX (14 * MENU_K)
 
 static int g_menu_filter_off;
 static int g_border_style;
@@ -643,8 +646,8 @@ static void menu_draw_battery(void)
 
 	/* Same glyph in both modes; Battery Colour Mode just changes the fill to a
 	 * level band (green/blue/red). */
-	int bw = 22, bh = 11, pad = 2, nub = 2;
-	int x = g_menuscreen_w - 8 - bw - nub, y = 6;
+	int k = MENU_K, bw = 22 * k, bh = 11 * k, pad = 2 * k, nub = 2 * k;
+	int x = g_menuscreen_w - 8 * k - bw - nub, y = 6 * k;
 	unsigned short out = (unsigned short)menu_text_color;    /* theme text color */
 	unsigned short bg  = (unsigned short)menu_sel_text_color;/* theme dark */
 	unsigned short fillc;

@@ -233,6 +233,8 @@ static size_t sf3000_fb_size = 0;
 // Forward declarations
 int sf3000_fb_init(void);
 void sf3000_fb_blit(const void *src, int width, int height, int pitch);
+int sf3000_panel_w(void);
+int sf3000_panel_h(void);
 void sf3000_fb_finish(void);
 int sf3000_is_r36sx(void);
 static void sf3000_text_native(int px, int py, const char *text, uint32_t color, int page_y_offset);
@@ -698,9 +700,22 @@ static int audio_resample_nearest(struct audio_frame data) {
 }
 #endif
 
+#ifdef PLATFORM_SF3000
+/* The in-game menu is drawn at the panel's own resolution into this buffer
+ * and presented like FrogUI's frames, so it isn't blurred by an upscale from
+ * the 320x240 SDL surface. NULL (allocation failed): the old 320x240 menu. */
+static uint16_t *g_menu_hi;
+#endif
+
 static void *fb_flip(void)
 {
 #ifdef PLATFORM_SF3000
+	if (g_menu_hi) {
+		extern void sf3000_fb_blit(const void *, int, int, int);
+		if (g_menuscreen_ptr)
+			sf3000_fb_blit(g_menu_hi, g_menuscreen_w, g_menuscreen_h, g_menuscreen_pp * 2);
+		return g_menu_hi;
+	}
 	/* Only blit during menu — game blits directly in plat_video_process */
 	if (screen && g_menuscreen_ptr) {
 		extern void sf3000_fb_blit(const void *, int, int, int);
@@ -894,14 +909,18 @@ void plat_video_menu_end(void)
 void plat_video_menu_leave(void)
 {
 	g_menu_open = 0;
-	memset(g_menubg_src_ptr, 0, g_menuscreen_h * g_menuscreen_pp * sizeof(uint16_t));
+	memset(g_menubg_src_ptr, 0, g_menubg_src_h * g_menubg_src_pp * sizeof(uint16_t));
 
 	SDL_LockSurface(screen);
-	memset(screen->pixels, 0, g_menuscreen_h * g_menuscreen_pp * sizeof(uint16_t));
+	memset(screen->pixels, 0, screen->h * screen->pitch);
 	SDL_UnlockSurface(screen);
+#ifdef PLATFORM_SF3000
+	if (g_menu_hi)
+		memset(g_menu_hi, 0, (size_t)g_menuscreen_h * g_menuscreen_pp * sizeof(uint16_t));
+#endif
 	fb_flip();
 	SDL_LockSurface(screen);
-	memset(screen->pixels, 0, g_menuscreen_h * g_menuscreen_pp * sizeof(uint16_t));
+	memset(screen->pixels, 0, screen->h * screen->pitch);
 	SDL_UnlockSurface(screen);
 
 	g_menuscreen_ptr = NULL;
@@ -1967,6 +1986,17 @@ int plat_init(void)
     g_menuscreen_w  = SCREEN_WIDTH;
     g_menuscreen_h  = SCREEN_HEIGHT;
     g_menuscreen_pp = SCREEN_WIDTH;
+    {
+        /* Menu at panel resolution (see g_menu_hi). Save-state screenshots
+         * and the menu background source stay 320x240. */
+        int pw = sf3000_panel_w(), ph = sf3000_panel_h();
+        if (pw >= 640 && ph >= 480 && pw <= 1280 && ph <= 960 &&
+            (g_menu_hi = calloc((size_t)pw * ph, sizeof *g_menu_hi))) {
+            g_menuscreen_w = g_menuscreen_pp = pw;
+            g_menuscreen_h = ph;
+        }
+        fprintf(stderr, "SF3000 menu: %dx%d\n", g_menuscreen_w, g_menuscreen_h);
+    }
     g_menuscreen_ptr = NULL;
     g_menubg_src_w  = SCREEN_WIDTH;
     g_menubg_src_h  = SCREEN_HEIGHT;
@@ -2881,7 +2911,8 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
 
 
 if (sf3000_use_hwdisp) {
-        int game_frame = (src != screen->pixels);
+        int menu_frame = src == screen->pixels || (g_menu_hi && src == g_menu_hi);
+        int game_frame = !menu_frame;
         /* HW edge-sharpen: skip only for frames that actually take the pixel-exact
          * SW-nearest path (small game frames under Nearest). Panel-size frames
          * (FrogUI menu, full-panel game) always go through the driver's HW bilinear
@@ -2897,7 +2928,7 @@ if (sf3000_use_hwdisp) {
          * frame; this only skips the present. Game frames only (not FrogUI). */
         extern int g_ff_level;
         int ff_skip = 0;
-        if (g_ff_level && src != screen->pixels) {
+        if (g_ff_level && !menu_frame) {
             static unsigned ff_ctr = 0;
             /* 2x/3x: present 1 of (level+1). Uncapped(3): no pacing, so present
              * every 2nd emulated frame (frameskip 1) to cut present cost. */
@@ -2953,7 +2984,7 @@ if (sf3000_use_hwdisp) {
          *   SF-class    → always Bilinear (HW). */
         int fmode;
         if (!sf3000_is_r36sx())            fmode = SCALE_FILTER_BILINEAR;
-        else if (src != screen->pixels)    fmode = scale_filter;
+        else if (!menu_frame)              fmode = scale_filter;
         else                               fmode = SCALE_FILTER_NEAREST;
         hwdisp_set_filter(fmode);
 
@@ -3085,7 +3116,7 @@ if (sf3000_use_hwdisp) {
     }
 
     int current_scale = scale_size;
-    if (src == screen->pixels) {
+    if (src == screen->pixels || (g_menu_hi && src == g_menu_hi)) {
         current_scale = SCALE_SIZE_ASPECT; /* Force menu to not stretch */
     }
 

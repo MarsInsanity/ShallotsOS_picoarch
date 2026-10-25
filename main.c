@@ -2040,10 +2040,13 @@ int main(int argc, char **argv) {
 /* moved to top of file */
 
 int quit(int code) {
-	menu_finish();
 #ifdef PLATFORM_SF3000
-	/* Final autosave before unloading core. */
+	/* Final autosave before unloading core. Capture the last game frame
+	 * first: the state's screenshot (the Load > Auto preview) is taken from
+	 * the menu buffers, which menu_finish frees. */
 	if (g_autosave_autoload && !g_is_frogui && current_core.retro_unload_game) {
+		extern void plat_video_capture(void);
+		plat_video_capture();
 		int prev = state_slot;
 		state_slot = 9;  /* reserved auto-save/auto-load slot (10th) */
 		pa_state_write();
@@ -2051,6 +2054,9 @@ int quit(int code) {
 		sync();
 		DBG("DBG quit: autosave_autoload final save to slot 99\n");
 	}
+#endif
+	menu_finish();
+#ifdef PLATFORM_SF3000
 	/* Leaving the game normally soon after a power-button save: it was not a
 	 * power-off, so drop that save (a shutdown's SIGTERM keeps it). */
 	if (!g_is_frogui && power_saved && !power_term) {

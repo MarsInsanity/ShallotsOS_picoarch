@@ -168,11 +168,24 @@ static int mh_rmcfg(int id, int keys)
 	return 1;
 }
 
-static void draw_src_bg(void) {
-	memcpy(g_menubg_ptr, g_menubg_src_ptr, g_menubg_src_h * g_menubg_src_pp * sizeof(uint16_t));
+/* The menu background from a picture of any size (the captured game frame
+ * or a save-state screenshot), scaled to the menu and dimmed. */
+static void menubg_from(const uint16_t *src, int sw, int sh, int spp) {
+	uint16_t *dst = g_menubg_ptr;
+	int W = g_menuscreen_w, H = g_menuscreen_h;
+	if (!dst || !src || sw <= 0 || sh <= 0) return;
+	for (int y = 0; y < H; y++) {
+		const uint16_t *srow = src + (size_t)(y * sh / H) * spp;
+		uint16_t *drow = dst + (size_t)y * g_menuscreen_pp;
+		for (int x = 0; x < W; x++) drow[x] = srow[x * sw / W];
+	}
 	/* darker=1 (x0.375) instead of x0.5: dim the menu background a bit more so
 	 * text stays readable on bright scenes. Same for every menu (all copy this). */
-	menu_darken_bg(g_menubg_ptr, g_menubg_src_ptr, g_menubg_src_h * g_menubg_src_pp, 1);
+	menu_darken_bg(g_menubg_ptr, g_menubg_ptr, g_menuscreen_h * g_menuscreen_pp, 1);
+}
+
+static void draw_src_bg(void) {
+	menubg_from(g_menubg_src_ptr, g_menubg_src_w, g_menubg_src_h, g_menubg_src_pp);
 }
 
 static int mh_set_core(int id, int keys) {
@@ -959,7 +972,7 @@ static void draw_savestate_bg(int slot)
 		goto finish;
 
 	if (bpp == sizeof(uint16_t)) {
-		menu_darken_bg(g_menubg_ptr, buf, w * h, 1);
+		menubg_from(buf, w, h, w);
 		drew_alt_bg = 1;
 	}
 
@@ -1136,10 +1149,10 @@ static int minui_hint(int x, int cy, int size, const char *btn, const char *labe
 static int minui_status_bar(const char *title, uint16_t bg, uint16_t fg) {
 	int W = g_menuscreen_w, H = g_menuscreen_h;
 	int h = H * 40 / 480;
-	if (h < 22) h = 22;   /* the battery is 11 px tall at y = 6 */
+	if (h < 22 * MENU_K) h = 22 * MENU_K;   /* the battery is 11 px tall at y = 6 */
 	minui_fill(0, 0, W, h, bg);
 	float px = h * 0.55f;
-	menu_font_set_px(px < 14 ? 14 : px);
+	menu_font_set_px(px < 14 * MENU_K ? 14 * MENU_K : px);
 	char label[128];
 	snprintf(label, sizeof label, "%s", title);
 	int room = W - W / 32 - 48;
@@ -1222,8 +1235,8 @@ static void me_draw_miyoo(const menu_entry *entries, int sel, void (*draw_more)(
 	if (first < 0) first = 0;
 
 	float px = rh * 0.42f;
-	if (px < 18) px = 18;
-	if (px > 28) px = 28;
+	if (px < 18 * MENU_K) px = 18 * MENU_K;
+	if (px > 28 * MENU_K) px = 28 * MENU_K;
 	menu_font_set_px(px);
 
 	for (int r = 0; r < per_page && first + r < n; r++) {
@@ -1313,8 +1326,8 @@ static void keys_draw_miyoo(const struct me_bind_action *opts_, int opt_cnt, int
 	if (first > opt_cnt - per_page) first = opt_cnt - per_page;
 	if (first < 0) first = 0;
 	float px = rh * 0.42f;
-	if (px < 18) px = 18;
-	if (px > 26) px = 26;
+	if (px < 18 * MENU_K) px = 18 * MENU_K;
+	if (px > 26 * MENU_K) px = 26 * MENU_K;
 	menu_font_set_px(px);
 
 	char title[64];
@@ -1395,8 +1408,8 @@ static void minui_draw_main(menu_entry *menu, int sel) {
 		if (e->enabled) rows++;
 	int rh = area_h / (rows > 6 ? rows : 6);
 	float px = rh * 0.42f;
-	if (px < 18) px = 18;
-	if (px > 30) px = 30;
+	if (px < 18 * MENU_K) px = 18 * MENU_K;
+	if (px > 30 * MENU_K) px = 30 * MENU_K;
 	menu_font_set_px(px);
 	minui_fill(0, 0, panel_w, area_h, PANEL);
 	int pad = W / 32, y = 0;

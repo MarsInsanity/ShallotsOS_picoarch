@@ -118,7 +118,7 @@ int menu_font_height(void) { return (int)font_px; }
 #define GC_FIRST 32
 #define GC_LAST  126
 #define GC_N     (GC_LAST - GC_FIRST + 1)
-#define GC_MAX   24                 /* max glyph dim cached (menu px ~14 → ~10) */
+#define GC_MAX   64                 /* max glyph dim cached (the menu at panel size goes to ~60 px) */
 typedef struct {
     unsigned char ready;            /* 0=empty 1=rasterized 2=blank(space) */
     short w, h, x0, y0;
