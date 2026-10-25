@@ -393,6 +393,32 @@ static void power_watch(const char *rom) {
 	}
 }
 
+/* Why the console powered itself off, shown after the next boot: by the
+ * resumed game (main loop), or by FrogUI's menu when nothing resumes. */
+#define POWEROFF_NOTE_FILE "/mnt/sdcard/picoarch/poweroff_note.txt"
+
+static void write_poweroff_note(const char *text) {
+	FILE *f = fopen(POWEROFF_NOTE_FILE, "w");
+	if (!f)
+		return;
+	fprintf(f, "%s\n", text);
+	fflush(f);
+	fsync(fileno(f));
+	fclose(f);
+}
+
+static int read_poweroff_note(char *out, size_t size) {
+	FILE *f = fopen(POWEROFF_NOTE_FILE, "r");
+	if (!f)
+		return 0;
+	int ok = fgets(out, size, f) != NULL;
+	fclose(f);
+	unlink(POWEROFF_NOTE_FILE);
+	if (ok)
+		out[strcspn(out, "\r\n")] = '\0';
+	return ok && out[0];
+}
+
 /* Low battery: once the level has stayed at LOW_BATTERY_PCT or below for
  * LOW_BATTERY_MS without charging (load makes the reading dip), save like a
  * power-off. A console with a momentary power button then powers off the way
@@ -424,6 +450,7 @@ static void low_battery_watch(const char *rom) {
 		return;
 	if (power_gpio && access(SHUTDOWN_SCRIPT, X_OK) == 0) {
 		plat_video_set_msg("Battery low: saving and shutting down", 1, 5000);
+		write_poweroff_note("Powered off: battery low");
 		power_suspend(rom);
 		power_saved = 1;
 		shutting_down = 1;
@@ -1050,6 +1077,15 @@ static void own_sleep(const char *rom) {
 		}
 		if (now - start >= g_sleep_poweroff_ms) {
 			DBG("DBG sleep: asleep too long, powering off\n");
+			{
+				char note[64];
+				long long secs = g_sleep_poweroff_ms / 1000;
+				if (secs < 60)
+					snprintf(note, sizeof note, "Powered off after %lld s asleep", secs);
+				else
+					snprintf(note, sizeof note, "Powered off after %lld min asleep", secs / 60);
+				write_poweroff_note(note);
+			}
 			if (can_save) {
 				power_suspend(rom);
 				power_saved = 1;
@@ -1818,8 +1854,13 @@ int main(int argc, char **argv) {
 			DBG("DBG resume: slot state %s\n", failed ? "failed" : "restored");
 #ifdef PLATFORM_SF3000
 			if (g_resume_suspend) {
+				char note[96];
 				switcher_discard();   /* a suspend state resumes once */
 				g_resume_suspend = 0;
+				if (!failed && read_poweroff_note(note, sizeof note - 16)) {
+					strcat(note, ", game resumed");
+					plat_video_set_msg(note, 1, 4000);
+				}
 			}
 #endif
 		}
