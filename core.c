@@ -627,7 +627,8 @@ static long long mono_ms(void) {
 	clock_gettime(CLOCK_MONOTONIC, &t);
 	return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
-#define FN_HOLD_MS 500   /* hold FN this long for the GameSwitcher */
+#define FN_HOLD_MS 600   /* hold FN this long for the GameSwitcher */
+#define FN_PROBE_MS 80   /* how often to check for FN+volume while FN is held */
 #define FN_RELEASE_POLLS 3 /* FN must read released this many polls in a row */
 #endif
 
@@ -679,24 +680,41 @@ static void pa_input_poll(void) {
 		}
 		/* FN: a tap opens the menu when released; holding it suspends the game
 		 * to FrogUI's GameSwitcher (when that setting is on). A short dropout
-		 * from the two-writer input race must not count as a release. */
+		 * from the two-writer input race must not count as a release. FN is
+		 * also the modifier for system shortcuts (FN+volume = brightness), so
+		 * an FN press used with any other button, or during which cubevol's
+		 * volume or backlight changed, is a combo and does neither. */
 		extern int g_switcher_enabled, g_switcher_requested;
-		static long long fn_down_ms = -1;
-		static int fn_hold_fired = 0, fn_up_polls = 0;
+		extern int sf3000_fn_combo_probe(void);
+		static long long fn_down_ms = -1, fn_probe_ms = 0;
+		static int fn_hold_fired = 0, fn_up_polls = 0, fn_combo = 0, fn_sig = -1;
 		int fn_tap = 0;
 		if (raw & FN_BIT) {
 			long long now = mono_ms();
 			fn_up_polls = 0;
 			if (fn_down_ms < 0) {
-				fn_down_ms = now;
+				fn_down_ms = fn_probe_ms = now;
 				fn_hold_fired = 0;
-			} else if (!fn_hold_fired && g_switcher_enabled &&
-			           now - fn_down_ms >= FN_HOLD_MS) {
+				fn_combo = 0;
+				fn_sig = sf3000_fn_combo_probe();
+			}
+			if (raw & 0xFFFFu)
+				fn_combo = 1;
+			if (!fn_combo && now - fn_probe_ms >= FN_PROBE_MS) {
+				fn_probe_ms = now;
+				if (sf3000_fn_combo_probe() != fn_sig)
+					fn_combo = 1;
+			}
+			if (!fn_hold_fired && !fn_combo && g_switcher_enabled &&
+			    now - fn_down_ms >= FN_HOLD_MS) {
 				fn_hold_fired = 1;
 				g_switcher_requested = 1;
 			}
 		} else if (fn_down_ms >= 0 && ++fn_up_polls >= FN_RELEASE_POLLS) {
-			fn_tap = !fn_hold_fired;
+			/* A volume press just before release may not be stored yet. */
+			if (!fn_combo && sf3000_fn_combo_probe() != fn_sig)
+				fn_combo = 1;
+			fn_tap = !fn_hold_fired && !fn_combo;
 			fn_down_ms = -1;
 		}
 		if (menu_armed && (((raw & (SEL_BIT | START_BIT)) == (SEL_BIT | START_BIT)) || fn_tap)) {

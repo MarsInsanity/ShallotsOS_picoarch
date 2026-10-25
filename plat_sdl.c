@@ -1160,6 +1160,25 @@ static int sf3000_pmem_volume_read(void)
 	return -1;
 }
 
+/* Snapshot of cubevol's volume and backlight, for spotting FN+volume
+ * shortcuts. The volume buttons never reach joy_key (cubevol reads them over
+ * GPIO), so a changed value is the only sign one was pressed. -1 on error. */
+int sf3000_fn_combo_probe(void)
+{
+	unsigned char buf[260];
+	int light = 0, sig = -1;
+	int fd = open("/dev/persistentmem", O_RDONLY);
+	if (fd < 0)
+		return -1;
+	struct sf3000_pmem_req vol = { 3, 0, 260, 0, buf };
+	struct sf3000_pmem_req bl = { 1, 30, 1, 0, &light };
+	if (ioctl(fd, SF3000_PMEM_GET, &vol) == 0 &&
+	    ioctl(fd, SF3000_PMEM_GET, &bl) == 0)
+		sig = (buf[0] << 8) | (light & 0xFF);
+	close(fd);
+	return sig;
+}
+
 /* Store the shared volume AND mirror it to the I2SO hardware path, exactly
  * like a cubevol button press does.  Also refresh sndgain.txt so legacy
  * standalone frontends (pcsx4all, lgpt) still see a consistent level.
