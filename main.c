@@ -480,6 +480,50 @@ static void dump_file(const char *path) {
 	DBG("DBG hw: %s = %s\n", path, buf);
 }
 
+/* Every property under a device-tree node (recursing `depth` levels): the
+ * name, then up to 64 bytes as hex words, or as text when printable. */
+static void dump_props(const char *dir, int depth) {
+	DIR *d = opendir(dir);
+	if (!d)
+		return;
+	struct dirent *e;
+	while ((e = readdir(d)) != NULL) {
+		if (e->d_name[0] == '.')
+			continue;
+		char path[512];
+		snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+		struct stat st;
+		if (stat(path, &st) != 0)
+			continue;
+		if (S_ISDIR(st.st_mode)) {
+			if (depth > 0)
+				dump_props(path, depth - 1);
+			continue;
+		}
+		unsigned char buf[64];
+		FILE *f = fopen(path, "rb");
+		if (!f)
+			continue;
+		size_t n = fread(buf, 1, sizeof buf, f);
+		fclose(f);
+		int text = n > 1;
+		for (size_t i = 0; i < n; i++)
+			if (buf[i] && (buf[i] < 32 || buf[i] > 126))
+				text = 0;
+		char out[200] = "";
+		if (text) {
+			snprintf(out, sizeof out, "\"%.*s\"", (int)n, buf);
+		} else {
+			size_t o = 0;
+			for (size_t i = 0; i + 3 < n && o + 10 < sizeof out; i += 4)
+				o += snprintf(out + o, sizeof out - o, "%02x%02x%02x%02x ",
+				              buf[i], buf[i + 1], buf[i + 2], buf[i + 3]);
+		}
+		DBG("DBG hw: %s = %s\n", path, out);
+	}
+	closedir(d);
+}
+
 static void hardware_report(void) {
 	if (access("/mnt/sdcard/log.txt", F_OK) != 0)
 		return;
@@ -501,16 +545,36 @@ static void hardware_report(void) {
 	dump_tree("/sys/class", 1);
 	dump_tree("/dev", 0);
 	dump_tree("/proc/device-tree", 2);
+	/* Property values of the nodes that may name the LED pin. */
+	static const char *const props[] = {
+		"/proc/device-tree/hcrtos/gpio-out-def/gpio-group",
+		"/proc/device-tree/soc/gpio_key_group",
+		"/proc/device-tree/soc/gpio-keys",
+		"/proc/device-tree/soc/pwm@18818410",
+		"/proc/device-tree/hcrtos/pwm@0",
+		"/proc/device-tree/panel",
+	};
+	for (size_t i = 0; i < sizeof props / sizeof props[0]; i++)
+		dump_props(props[i], 2);
+	/* State of every GPIO bank: base + 0 IER, 4 REC, 8 FEC, 0xc input,
+	 * 0x10 output, 0x14 direction (1 = output), 0x18 ISR. */
+	static const unsigned banks[] = {0x44, 0xc4, 0xe4, 0x344};
 	int fd = open("/dev/mem", O_RDONLY | O_SYNC);
 	if (fd >= 0) {
 		void *p = mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, POWER_GPIO_BASE);
 		if (p != MAP_FAILED) {
 			volatile uint32_t *r = p;
-			for (int off = 0x44; off <= 0x5c; off += 4)
-				DBG("DBG hw: gpio+0x%02x = %08x\n", off, r[off / 4]);
+			for (size_t b = 0; b < sizeof banks / sizeof banks[0]; b++)
+				DBG("DBG hw: gpio bank 0x%03x: in=%08x out=%08x dir=%08x\n", banks[b],
+				    r[(banks[b] + 0x0c) / 4], r[(banks[b] + 0x10) / 4], r[(banks[b] + 0x14) / 4]);
 			munmap(p, 4096);
 		}
 		close(fd);
+	}
+	{
+		extern int menu_battery_level(int *charging);
+		int charging = 0, pct = menu_battery_level(&charging);
+		DBG("DBG hw: battery %d%% charging=%d\n", pct, charging);
 	}
 	DBG("DBG hw: --- end ---\n");
 }
