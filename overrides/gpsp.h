@@ -21,7 +21,7 @@ static const struct core_override_option gpsp_core_option_overrides[] = {
 	{
 		.key = "gpsp_frameskip",
 		.info = "Skip frames to avoid audio crackling. Improves performance at the expense of visual smoothness.",
-		.default_value = "disabled",
+		.default_value = "auto",
 		.options = {
 			[2] = {"auto_threshold", "Threshold"},
 			[3] = {"fixed_interval", "Fixed"},

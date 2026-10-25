@@ -1609,7 +1609,16 @@ static void adjust_audio(void) {
 
 	if (current_core.retro_audio_buffer_status) {
 		float occupancy = 1.0 - plat_sound_capacity();
-		current_core.retro_audio_buffer_status(true, (int)(occupancy * 100), occupancy < 0.50);
+		/* "Underrun likely" drives the cores' Auto frameskip. The SF3000 ring
+		 * is kept between half and three quarters full, so half full is a
+		 * game running at speed; only below a quarter (~20 ms, about one
+		 * frame of audio) is the game falling behind. */
+#ifdef PLATFORM_SF3000
+		bool behind = occupancy < 0.25;
+#else
+		bool behind = occupancy < 0.50;
+#endif
+		current_core.retro_audio_buffer_status(true, (int)(occupancy * 100), behind);
 	}
 }
 

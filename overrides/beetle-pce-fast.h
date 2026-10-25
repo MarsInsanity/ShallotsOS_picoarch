@@ -4,7 +4,7 @@ static const struct core_override_option beetle_pce_fast_core_option_overrides[]
 	{
 		.key = "pce_fast_frameskip",
 		.info = "Skip frames to avoid audio crackling. Improves performance at the expense of visual smoothness.",
-		.default_value = "disabled",
+		.default_value = "auto",
 		.options = {
 			[2] = {"auto_threshold", "Threshold"},
 			[3] = {"fixed_interval", "Fixed"},
@@ -101,7 +101,7 @@ const struct core_override_fast_forward beetle_pce_fast_fast_forward = {
 };
 
 #define beetle_pce_fast_overrides {                                    \
-	.core_name = "beetle-pce-fast",                                \
+	.core_name = "mednafen_pce_fast",                              \
 	.fast_forward = &beetle_pce_fast_fast_forward,                 \
 	.actions = beetle_pce_fast_ctrl_actions,                       \
 	.action_size = array_size(beetle_pce_fast_ctrl_actions),       \

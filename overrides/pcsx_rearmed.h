@@ -4,7 +4,7 @@ static const struct core_override_option pcsx_rearmed_core_option_overrides[] = 
 	{
 		.key = "pcsx_rearmed_frameskip_type",
 		.info = "Skip frames to avoid audio crackling. Improves performance at the expense of visual smoothness. Will cause graphical glitches.",
-		.default_value = "disabled",
+		.default_value = "auto",
 		.options = {
 			[2] = {"auto_threshold", "Threshold"},
 			[3] = {"fixed_interval", "Fixed"},
@@ -29,6 +29,15 @@ static const struct core_override_option pcsx_rearmed_core_option_overrides[] = 
 		.key = "pcsx_rearmed_dithering",
 		.desc = "Dithering",
 		.info = "If disabled, turns off the dithering pattern the PSX applies to combat color banding.",
+		/* Off like PCSX4ALL: the panel shows the 16-bit image as is and the
+		 * dither pattern only adds noise and GPU work. */
+		.default_value = "disabled",
+	},
+	{
+		.key = "pcsx_rearmed_spu_thread",
+		.desc = "Threaded SPU",
+		.info = "Mixes sound on another CPU core. Frees the main core for the game; turn off if a game's music drifts or stutters.",
+		.default_value = "enabled",
 	},
 	
 	// TODO: don't apply to TRIMUI

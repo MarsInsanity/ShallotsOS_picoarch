@@ -915,13 +915,16 @@ static void lag_frame(long long present_us) {
 	lag_read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", cur, sizeof cur);
 	lag_read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq", max, sizeof max);
 	int sdlq = SDL_PeepEvents(NULL, 0, SDL_PEEKEVENT, SDL_ALLEVENTS);
-	/* emu = retro_run minus the present inside it: the core's own cost. */
+	/* emu = retro_run minus the present inside it: the core's own cost.
+	 * skipped = runs that showed no frame (the core's Auto frameskip). */
 	long long run_avg = lag_runs ? lag_run_sum / lag_runs : 0;
-	dbg_log("DBG lag: fps=%.1f frame max=%lldms run avg/max=%.1f/%lldms present avg/max=%.1f/%lldms "
+	long long emu_avg = lag_runs ? (lag_run_sum - pres_sum) / lag_runs : 0;
+	unsigned skipped = lag_runs > frames ? lag_runs - frames : 0;
+	dbg_log("DBG lag: fps=%.1f skipped=%u frame max=%lldms run avg/max=%.1f/%lldms present avg/max=%.1f/%lldms "
 	        "emu~%.1fms audio=%u sdlq=%d cpu=%s %s/%s filter=%d rewind=%d\n",
-	        frames * 1000000.0 / (now - window_start), int_max / 1000,
+	        frames * 1000000.0 / (now - window_start), skipped, int_max / 1000,
 	        run_avg / 1000.0, lag_run_max / 1000, pres_sum / (double)frames / 1000.0, pres_max / 1000,
-	        (run_avg - pres_sum / frames) / 1000.0, lag_aring_queued(), sdlq, gov, cur, max,
+	        emu_avg / 1000.0, lag_aring_queued(), sdlq, gov, cur, max,
 	        (int)scale_filter, lag_rewind);
 	window_start = now;
 	frames = 0; int_max = pres_sum = pres_max = 0;
