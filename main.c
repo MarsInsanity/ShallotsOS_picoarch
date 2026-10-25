@@ -12,6 +12,8 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <dirent.h>
+#include <strings.h>
+#include <sys/mman.h>
 #include <malloc.h>
 #include <dlfcn.h>
 
@@ -182,8 +184,8 @@ static void load_frogui_settings(void) {
 	DBG("DBG load_frogui_settings: quick_resume=%d autosave_autoload=%d stock_battery=%d\n",
 	        g_quick_resume, g_autosave_autoload, g_stock_battery);
 }
-static int read_last_game(char *core, size_t cs, char *rom, size_t rs) {
-	FILE *f = fopen(LAST_GAME_FILE, "r");
+static int read_game_file(const char *file, char *core, size_t cs, char *rom, size_t rs) {
+	FILE *f = fopen(file, "r");
 	if (!f) { DBG("DBG read_last_game: file missing (good)\n"); return 0; }
 	core[0] = rom[0] = 0;
 	if (fgets(core, cs, f)) core[strcspn(core, "\r\n")] = 0;
@@ -191,6 +193,9 @@ static int read_last_game(char *core, size_t cs, char *rom, size_t rs) {
 	fclose(f);
 	DBG("DBG read_last_game: core=%s rom=%s\n", core, rom);
 	return (core[0] && rom[0]);
+}
+static int read_last_game(char *core, size_t cs, char *rom, size_t rs) {
+	return read_game_file(LAST_GAME_FILE, core, cs, rom, rs);
 }
 static void write_last_game(const char *core, const char *rom) {
 	FILE *f = fopen(LAST_GAME_FILE, "w");
@@ -246,6 +251,108 @@ static void switcher_suspend(void) {
 	sync();
 	DBG("DBG switcher: suspend state %s\n", g_suspended ? "saved" : "not saved");
 	should_quit = 1;
+}
+
+/* ---- Save on power-off -----------------------------------------------------
+ * The power button is pin 14 of the GPIO bank at 0x18800000: cubegm/powergpio
+ * powers off by driving it low (ALi/HiChip layout: +0x50 input, +0x54 output,
+ * +0x58 direction, 1 = output). A long press cuts power in hardware, about 4 s
+ * in, without telling software. So watch the pin: once it has been held for a
+ * second in a game, suspend to the GameSwitcher slot and leave a marker so the
+ * next boot resumes the game. Letting go while the console is still on means
+ * it wasn't a power-off: the save is dropped and play continues. A short press
+ * (sleep) never gets that far. */
+#define POWER_GPIO_BASE   0x18800000u
+#define POWER_GPIO_IN     (0x50 / 4)
+#define POWER_GPIO_DIR    (0x58 / 4)
+#define POWER_GPIO_BIT    (1u << 14)
+#define POWER_SAVE_MS     1000
+#define POWER_RESUME_FILE "/mnt/sdcard/picoarch/resume_on_boot.txt"
+static volatile uint32_t *power_gpio;
+
+static void power_watch_init(void) {
+	const char *dev = getenv("TF_DEVICE");
+	if (dev && !strcasecmp(dev, "SF3000"))
+		return;   /* a real power switch: nothing to watch */
+	int fd = open("/dev/mem", O_RDONLY | O_SYNC);
+	if (fd < 0)
+		return;
+	void *p = mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, POWER_GPIO_BASE);
+	close(fd);
+	if (p == MAP_FAILED)
+		return;
+	volatile uint32_t *r = p;
+	/* Fail closed unless the pin is an input that reads released (high). */
+	if ((r[POWER_GPIO_DIR] & POWER_GPIO_BIT) || !(r[POWER_GPIO_IN] & POWER_GPIO_BIT)) {
+		DBG("DBG power: pin 14 not an idle input, not watching\n");
+		munmap(p, 4096);
+		return;
+	}
+	power_gpio = r;
+}
+
+static void power_suspend(const char *rom) {
+	plat_video_menu_enter(1);   /* refresh the GameSwitcher screenshot */
+	int prev = state_slot;
+	state_slot = SWITCHER_SLOT;
+	g_suspended = state_allowed() && pa_state_write() == 0;
+	state_slot = prev;
+	plat_video_menu_leave();
+	sram_write();
+	if (g_suspended) {
+		FILE *f = fopen(POWER_RESUME_FILE, "w");
+		if (f) {
+			fprintf(f, "%s\n%s\n", core_path, rom);
+			fflush(f);
+			fsync(fileno(f));
+			fclose(f);
+		}
+	}
+	sync();
+	DBG("DBG power: suspend state %s\n", g_suspended ? "saved" : "not saved");
+}
+
+static void power_watch(const char *rom) {
+	static long long down_since = -1;
+	static int saved = 0;
+	if (!power_gpio)
+		return;
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	long long now = (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+	if (!(power_gpio[POWER_GPIO_IN] & POWER_GPIO_BIT)) {
+		if (down_since < 0)
+			down_since = now;
+		else if (!saved && now - down_since >= POWER_SAVE_MS) {
+			power_suspend(rom);
+			saved = 1;
+		}
+		return;
+	}
+	if (saved) {
+		/* Still running after the button was let go: not a power-off. */
+		switcher_discard();
+		unlink(POWER_RESUME_FILE);
+		sync();
+		g_suspended = 0;
+		saved = 0;
+		DBG("DBG power: released, suspend state dropped\n");
+	}
+	down_since = -1;
+}
+
+/* After a power-off in a game, the first launcher start resumes it. The
+ * marker is removed first, so a game that fails to start can't loop. */
+static void power_resume_redirect(void) {
+	char core[512], rom[512];
+	if (!read_game_file(POWER_RESUME_FILE, core, sizeof core, rom, sizeof rom))
+		return;
+	unlink(POWER_RESUME_FILE);
+	sync();
+	if (access(core, F_OK) != 0 || access(rom, F_OK) != 0)
+		return;
+	DBG("DBG power: resuming %s after power-off\n", rom);
+	execl(picoarch_for_core(core), "picoarch", core, rom, NULL);
 }
 #endif
 
@@ -1065,6 +1172,7 @@ int main(int argc, char **argv) {
 	 * Marker cleared on clean exit to FrogUI (Quit). */
 	if (argc > 1 && strcmp(argv[1], FROGUI_CORE) == 0) {
 		load_frogui_settings();
+		power_resume_redirect();
 		if (g_quick_resume) {
 			char lg_core[512], lg_rom[512];
 			if (read_last_game(lg_core, sizeof(lg_core), lg_rom, sizeof(lg_rom))) {
@@ -1237,6 +1345,7 @@ int main(int argc, char **argv) {
 			g_resume_suspend = 1;
 			DBG("DBG switcher: resuming suspend state\n");
 		}
+		power_watch_init();
 	}
 #endif
 	/* Restore a few frames in rather than right after loading: some cores
@@ -1288,6 +1397,8 @@ int main(int argc, char **argv) {
 			g_switcher_requested = 0;
 			switcher_suspend();
 		}
+		if (!g_is_frogui && !should_quit)
+			power_watch(content_path);
 #endif
 		if (!should_quit)
 			plat_video_flip();
