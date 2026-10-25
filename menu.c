@@ -124,6 +124,13 @@ static void minui_border(int x, int y, int w, int h, int t, uint16_t c);
 static void minui_thumb(const uint16_t *src, int sw, int sh, int spp,
                         int dx, int dy, int dw, int dh);
 
+/* Miyoo-style drawing of every me_loop list (Options and its pages), defined
+ * after the main menu's helpers below; me_draw uses it once the TTF is up. */
+static void me_draw_miyoo(const menu_entry *entries, int sel, void (*draw_more)(void));
+struct me_bind_action;
+static void keys_draw_miyoo(const struct me_bind_action *opts, int opt_cnt, int player_idx,
+                            int sel, int dev_id, int is_bind);
+
 #include "libpicofe/menu.c"
 
 static void draw_menu_message(const char *msg, void (*draw_more)(void))  __attribute__((unused));
@@ -1065,6 +1072,200 @@ static int minui_hint(int x, int cy, int size, const char *btn, const char *labe
 	x += size + size / 4;
 	minui_text_mid(x, cy, label, 0xFFFF);
 	return x + menu_font_measure(label) + size;
+}
+
+/* A list row's value text ("" when it has none); *can_change is set for
+ * values Left/Right step through. */
+static void me_value_text(const menu_entry *ent, char *out, size_t size, int *can_change) {
+	int offs = 0;
+	out[0] = '\0';
+	*can_change = 0;
+	switch (ent->beh) {
+	case MB_OPT_ONOFF:
+		snprintf(out, size, "%s", me_read_onoff(ent) ? tr_or("value.on", "On") : tr_or("value.off", "Off"));
+		*can_change = 1;
+		break;
+	case MB_OPT_RANGE:
+		snprintf(out, size, "%d", *(int *)ent->var);
+		*can_change = 1;
+		break;
+	case MB_OPT_CUSTOM:
+	case MB_OPT_CUSTONOFF:
+	case MB_OPT_CUSTRANGE: {
+		const char *name = ent->generate_name ? ent->generate_name(ent->id, &offs) : NULL;
+		if (name)
+			snprintf(out, size, "%s", name);
+		*can_change = ent->beh != MB_OPT_CUSTOM || ent->handler != NULL;
+		break;
+	}
+	case MB_OPT_ENUM: {
+		const char **names = (const char **)ent->data;
+		int v = *(unsigned char *)ent->var;
+		for (int i = 0; names && names[i]; i++)
+			if (i == v) {
+				snprintf(out, size, "%s", names[i]);
+				break;
+			}
+		*can_change = 1;
+		break;
+	}
+	default:
+		break;
+	}
+}
+
+static void me_draw_miyoo(const menu_entry *entries, int sel, void (*draw_more)(void)) {
+	extern int menu_sel_color, menu_sel_text_color;
+	const uint16_t ACCENT = (menu_sel_color >= 0) ? (uint16_t)menu_sel_color : 0xC104;
+	const uint16_t SEL_TEXT = (uint16_t)menu_sel_text_color;
+	const uint16_t PANEL = 0x18E3, FOOTER = 0x10A2, DIM = 0xA534;
+	int W = g_menuscreen_w, H = g_menuscreen_h;
+	int foot_h = H * 56 / 480, area_h = H - foot_h;
+	int rh = area_h / 7, pad = W / 32;
+
+	/* Visible rows, and the window that keeps the selection on screen. */
+	int vis[256], n = 0, sel_vis = 0;
+	for (int i = 0; entries[i].name && n < 256; i++) {
+		if (!entries[i].enabled) continue;
+		if (i == sel) sel_vis = n;
+		vis[n++] = i;
+	}
+	int per_page = area_h / rh;
+	int first = sel_vis - per_page / 2;
+	if (first > n - per_page) first = n - per_page;
+	if (first < 0) first = 0;
+
+	plat_video_menu_begin();
+	minui_fill(0, 0, W, H, PANEL);
+	float px = rh * 0.42f;
+	if (px < 18) px = 18;
+	if (px > 28) px = 28;
+	menu_font_set_px(px);
+
+	for (int r = 0; r < per_page && first + r < n; r++) {
+		const menu_entry *ent = &entries[vis[first + r]];
+		int on = vis[first + r] == sel, y = r * rh;
+		uint16_t tc = on ? SEL_TEXT : 0xFFFF;
+		if (on)
+			minui_fill(0, y, W, rh, ACCENT);
+		int offs = 0;
+		const char *name = ent->name;
+		if ((!name || !name[0]) && ent->generate_name)
+			name = ent->generate_name(ent->id, &offs);
+		char value[96];
+		int can_change;
+		me_value_text(ent, value, sizeof value, &can_change);
+		int right = W - pad, vw = menu_font_measure(value), a = rh / 4;
+		if (value[0]) {
+			if (can_change) {
+				minui_arrow(right - a / 2, y + rh / 2, a, 1, tc);
+				right -= a * 2;
+			}
+			minui_text_mid(right - vw, y + rh / 2, value, on ? tc : DIM);
+			if (can_change)
+				minui_arrow(right - vw - a, y + rh / 2, a, -1, tc);
+		}
+		/* Keep the name clear of the value; cut it with "..." if needed. */
+		char label[128];
+		snprintf(label, sizeof label, "%s", name ? name : "");
+		int room = (value[0] ? right - vw - a * 3 : W - pad) - pad;
+		while (label[0] && menu_font_measure(label) > room) {
+			size_t len = strlen(label);
+			if (len <= 4) { label[0] = '\0'; break; }
+			label[len - 4] = '\0';
+			strcat(label, "...");
+		}
+		minui_text_mid(pad, y + rh / 2, label, tc);
+	}
+
+	/* Hint bar; a message (or the row's help) takes it over for a while. */
+	minui_fill(0, area_h, W, foot_h, FOOTER);
+	int cy = area_h + foot_h / 2, bsz = foot_h * 6 / 10;
+	const char *note = menu_error_msg[0] ? menu_error_msg : NULL;
+	if (note && plat_get_ticks_ms() - menu_error_time > 2048)
+		menu_error_msg[0] = 0, note = NULL;
+	if (note) {
+		minui_text_mid(pad, cy, note, 0xFFFF);
+	} else {
+		int hx = minui_hint(pad, cy, bsz, "A", tr_or("pico.legend.ok", "OK"), ACCENT);
+		hx = minui_hint(hx, cy, bsz, "B", tr_or("pico.legend.back", "BACK"), ACCENT);
+		int a = bsz / 3;
+		minui_arrow(hx + a / 2, cy, a, -1, 0xFFFF);
+		minui_arrow(hx + a * 2, cy, a, 1, 0xFFFF);
+		minui_text_mid(hx + a * 3 + a / 2, cy, tr_or("pico.legend.change", "CHANGE"), 0xFFFF);
+		if (n > per_page) {
+			char pos[16];
+			snprintf(pos, sizeof pos, "%d/%d", sel_vis + 1, n);
+			minui_text_mid(W - pad - menu_font_measure(pos), cy, pos, DIM);
+		}
+	}
+
+	menu_font_set_px((float)MENU_TTF_PX);
+	if (draw_more)
+		draw_more();
+	menu_draw_end();
+}
+
+/* Player / Emulator controls in the same style: a title row, each action
+ * with its binding on the right, and the bind/clear keys in the hint bar. */
+static void keys_draw_miyoo(const struct me_bind_action *opts_, int opt_cnt, int player_idx,
+                            int sel, int dev_id, int is_bind) {
+	const me_bind_action *opts = (const me_bind_action *)opts_;
+	extern int menu_sel_color, menu_sel_text_color;
+	const uint16_t ACCENT = (menu_sel_color >= 0) ? (uint16_t)menu_sel_color : 0xC104;
+	const uint16_t SEL_TEXT = (uint16_t)menu_sel_text_color;
+	const uint16_t PANEL = 0x18E3, FOOTER = 0x10A2, DIM = 0xA534;
+	int W = g_menuscreen_w, H = g_menuscreen_h;
+	int foot_h = H * 56 / 480, area_h = H - foot_h;
+	int rh = area_h / 8, pad = W / 32;
+	int per_page = area_h / rh - 1;   /* the first row is the title */
+	int first = sel - per_page / 2;
+	if (first > opt_cnt - per_page) first = opt_cnt - per_page;
+	if (first < 0) first = 0;
+
+	plat_video_menu_begin();
+	minui_fill(0, 0, W, H, PANEL);
+	float px = rh * 0.42f;
+	if (px < 18) px = 18;
+	if (px > 26) px = 26;
+	menu_font_set_px(px);
+
+	char title[64];
+	if (player_idx >= 0)
+		snprintf(title, sizeof title, tr_or("pico.keys.player", "Player %d controls"), player_idx + 1);
+	else
+		snprintf(title, sizeof title, "%s", tr_or("pico.keys.emulator", "Emulator controls"));
+	minui_text_mid(pad, rh / 2, title, ACCENT);
+	if (opt_cnt > per_page) {
+		char pos[24];
+		snprintf(pos, sizeof pos, "%d/%d", sel + 1, opt_cnt);
+		minui_text_mid(W - pad - menu_font_measure(pos), rh / 2, pos, DIM);
+	}
+	for (int r = 0; r < per_page && first + r < opt_cnt; r++) {
+		int i = first + r, y = (r + 1) * rh, on = i == sel;
+		uint16_t tc = on ? SEL_TEXT : 0xFFFF;
+		if (on)
+			minui_fill(0, y, W, rh, ACCENT);
+		const char *bind = action_binds(player_idx, opts[i].mask, dev_id);
+		int bw = menu_font_measure(bind);
+		minui_text_mid(pad, y + rh / 2, localized_action_name(opts[i].name), tc);
+		minui_text_mid(W - pad - bw, y + rh / 2, bind, on ? tc : DIM);
+	}
+
+	minui_fill(0, area_h, W, foot_h, FOOTER);
+	int cy = area_h + foot_h / 2, bsz = foot_h * 6 / 10;
+	if (is_bind) {
+		minui_text_mid(pad, cy, tr_or("pico.keys.press", "Press a button to bind or unbind"), 0xFFFF);
+	} else {
+		char ok[16], clr[16];
+		snprintf(ok, sizeof ok, "%s", in_get_key_name(-1, -PBTN_MOK));
+		snprintf(clr, sizeof clr, "%s", in_get_key_name(-1, -PBTN_MA2));
+		int hx = minui_hint(pad, cy, bsz, ok[0] ? ok : "A", tr_or("pico.legend.bind", "BIND"), ACCENT);
+		hx = minui_hint(hx, cy, bsz, clr[0] ? clr : "X", tr_or("pico.legend.clear", "CLEAR"), ACCENT);
+		minui_hint(hx, cy, bsz, "B", tr_or("pico.legend.back", "BACK"), ACCENT);
+	}
+	menu_font_set_px((float)MENU_TTF_PX);
+	menu_draw_end();
 }
 
 static void minui_draw_main(menu_entry *menu, int sel) {

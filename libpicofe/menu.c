@@ -739,6 +739,11 @@ static void me_draw(const menu_entry *entries, int sel, void (*draw_more)(void))
 	const char *name;
 	int i, n;
 
+	if (menu_font_ready()) {
+		me_draw_miyoo(entries, sel, draw_more);   /* menu.c: Miyoo-style list */
+		return;
+	}
+
 	/* calculate size of menu rect */
 	for (ent = entries, i = n = 0; ent->name; ent++, i++)
 	{
@@ -1690,6 +1695,13 @@ static void draw_key_config(const me_bind_action *opts, int opt_cnt, int player_
 	int x, y, w, i;
 	int first, visible;
 	const int footer_y = g_menuscreen_h - 4 * me_mfont_h;
+
+	if (menu_font_ready() && dev_count <= 1) {
+		/* menu.c: Miyoo-style controls page (one input device). */
+		keys_draw_miyoo((const struct me_bind_action *)opts, opt_cnt, player_idx,
+		                sel, dev_id, is_bind);
+		return;
+	}
 
 	/* Thirty columns fit the longest binding plus the scroll-range indicator
 	 * on the compact menu surface. */
