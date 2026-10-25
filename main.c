@@ -169,6 +169,7 @@ static void apply_brightness(int level) {
 extern int g_switcher_enabled;   /* defined with the GameSwitcher code below */
 int g_game_keys = 0;   /* FrogUI "game_keys": 0 = FN, 1 = hold SELECT/START, 2 = combos */
 static int g_power_resume = 1;   /* FrogUI "Resume After Power-Off" */
+static int g_own_sleep;          /* ShallotsOS sleep on a short press, see own_sleep */
 static void load_frogui_settings(void) {
 	/* filter: FrogUI's choice is only the DEFAULT: if this game has its own
 	 * config (config_override), its in-menu Filter choice wins, so don't
@@ -185,6 +186,8 @@ static void load_frogui_settings(void) {
 	g_brightness       = frogui_setting_int("brightness", -1);   /* applied on game path only */
 	g_switcher_enabled = !frogui_setting_is("game_switcher", "off");
 	g_power_resume = !frogui_setting_is("power_resume", "off");
+	/* cubevol's sleep is patched out with Disable Sleep on: sleep ourselves. */
+	g_own_sleep = frogui_setting_is("disable_sleep", "on");
 	g_game_keys = frogui_setting_is("game_keys", "hold") ? 1
 	            : frogui_setting_is("game_keys", "combo") ? 2 : 0;
 	DBG("DBG load_frogui_settings: quick_resume=%d autosave_autoload=%d stock_battery=%d\n",
@@ -328,11 +331,15 @@ static void power_suspend(const char *rom) {
 	DBG("DBG power: suspend state %s\n", g_suspended ? "saved" : "not saved");
 }
 
+static void own_sleep(const char *rom);
+
+/* rom is NULL in the launcher: sleep only, no save. */
 static void power_watch(const char *rom) {
 	static long long down_since = -1, released_at = -1;
+	const int can_save = rom && g_power_resume;
 	if (power_term) {
 		/* The shutdown asked us to quit: save if not done yet, then leave. */
-		if (!power_saved)
+		if (!power_saved && can_save)
 			power_suspend(rom);
 		power_saved = 1;
 		should_quit = 1;
@@ -349,14 +356,21 @@ static void power_watch(const char *rom) {
 			down_since = now;
 			DBG("DBG power: button down\n");
 		}
-		else if (!power_saved && now - down_since >= POWER_SAVE_MS) {
+		else if (!power_saved && can_save && now - down_since >= POWER_SAVE_MS) {
 			power_suspend(rom);
 			power_saved = 1;
 		}
 		return;
 	}
-	if (down_since >= 0)
-		DBG("DBG power: button up after %lld ms\n", now - down_since);
+	if (down_since >= 0) {
+		long long held = now - down_since;
+		DBG("DBG power: button up after %lld ms\n", held);
+		down_since = -1;
+		if (held < POWER_SAVE_MS && !power_saved && g_own_sleep) {
+			own_sleep(rom);
+			return;
+		}
+	}
 	down_since = -1;
 	if (!power_saved)
 		return;
@@ -883,6 +897,109 @@ static void sleep_watch(void) {
 	if (g_stock_battery) fb1_set_visible(0);
 	else fb1_clear();
 	plat_sound_pause_for_menu();   /* drop audio queued around the sleep */
+	plat_sound_resume_from_menu();
+}
+
+/* ---- ShallotsOS sleep --------------------------------------------------------
+ * The firmware's sleep (cubevol) only pauses the game: the kernel never
+ * suspends, the front LEDs stay lit and the battery drains, and waking leaves
+ * its OSD showing and the game slow. With "Disable Sleep" on, cubevol ignores
+ * short presses, so ShallotsOS sleeps itself, like OnionOS: a short press
+ * pauses the game, mutes audio, turns the backlight off and lets the CPU slow
+ * down; the next short press wakes it and puts back exactly what it changed.
+ * After SLEEP_POWEROFF_MS asleep it powers off (saving the game for Resume
+ * After Power-Off first), which also stops the LEDs. Holding power while
+ * asleep powers off as usual, saving the game first. */
+#define SLEEP_POWEROFF_MS (5 * 60 * 1000)
+
+static void cpu_power_save(void) {
+	for (int i = 0; i < 4; i++) {
+		char path[96], min[32] = "";
+		snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_min_freq", i);
+		FILE *f = fopen(path, "r");
+		if (!f)
+			continue;
+		if (!fgets(min, sizeof min, f))
+			min[0] = '\0';
+		fclose(f);
+		snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_min_freq", i);
+		if (min[0] && (f = fopen(path, "w"))) {
+			fputs(min, f);
+			fclose(f);
+		}
+		snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_governor", i);
+		if ((f = fopen(path, "w"))) {
+			fputs("powersave", f);
+			fclose(f);
+		}
+	}
+}
+
+static void backlight_write(int raw) {
+	int fd = open("/dev/backlight", O_RDWR);
+	if (fd < 0)
+		return;
+	if (write(fd, &raw, sizeof raw) != sizeof raw)
+		DBG("DBG sleep: backlight write failed errno=%d\n", errno);
+	close(fd);
+}
+
+static long long sleep_now_ms(void) {
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+static void own_sleep(const char *rom) {
+	extern int sf3000_backlight_raw(void);
+	const int can_save = rom && g_power_resume;
+	int light = sf3000_backlight_raw();
+	DBG("DBG sleep: ShallotsOS sleep (backlight %d)\n", light);
+	plat_sound_pause_for_menu();
+	backlight_write(0);
+	cpu_power_save();
+	long long start = sleep_now_ms(), down_at = -1;
+	int powering_off = 0;
+	for (;;) {
+		usleep(50000);
+		long long now = sleep_now_ms();
+		int down = !(power_gpio[POWER_GPIO_IN] & POWER_GPIO_BIT);
+		if (powering_off || power_term)
+			continue;   /* wait for the power to go */
+		if (down) {
+			if (down_at < 0)
+				down_at = now;
+			if (now - down_at >= POWER_SAVE_MS) {
+				/* Held: the firmware is powering off. */
+				if (can_save) {
+					power_suspend(rom);
+					power_saved = 1;
+				}
+				powering_off = 1;
+			}
+		} else if (down_at >= 0) {
+			break;   /* a short press: wake up */
+		}
+		if (now - start >= SLEEP_POWEROFF_MS) {
+			DBG("DBG sleep: asleep too long, powering off\n");
+			if (can_save) {
+				power_suspend(rom);
+				power_saved = 1;
+			}
+			sync();
+			if (fork() == 0) {
+				execl("/bin/sh", "sh", SHUTDOWN_SCRIPT, (char *)NULL);
+				_exit(1);
+			}
+			powering_off = 1;
+		}
+	}
+	DBG("DBG sleep: waking after %lld ms\n", sleep_now_ms() - start);
+	cpu_full_speed();
+	if (light >= 0)
+		backlight_write(light);
+	else if (g_brightness >= 0)
+		apply_brightness(g_brightness);
 	plat_sound_resume_from_menu();
 }
 #endif
@@ -1591,6 +1708,8 @@ int main(int argc, char **argv) {
 			signal(SIGTERM, power_term_handler);
 		}
 	}
+	if (g_own_sleep && !power_gpio)
+		power_watch_init();   /* the launcher, or a game without power resume */
 #endif
 	/* Restore a few frames in rather than right after loading: some cores
 	 * (fake08) only start the cart on their first frame, which would replace
@@ -1641,9 +1760,10 @@ int main(int argc, char **argv) {
 			g_switcher_requested = 0;
 			switcher_suspend();
 		}
-		if (!g_is_frogui && !should_quit && g_power_resume) {
-			power_watch(content_path);
-			low_battery_watch(content_path);
+		if (!should_quit) {
+			power_watch(g_is_frogui ? NULL : content_path);
+			if (!g_is_frogui && g_power_resume)
+				low_battery_watch(content_path);
 		}
 #endif
 		if (!should_quit)

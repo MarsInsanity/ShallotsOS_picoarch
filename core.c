@@ -663,6 +663,7 @@ static void pa_input_poll(void) {
 		const uint32_t SEL_BIT   = (1u << 0);   /* SELECT = bit 0  */
 		const uint32_t START_BIT = (1u << 3);   /* START  = bit 3  */
 		const uint32_t FN_BIT    = (1u << 16);  /* FN     = bit 16 */
+		const uint32_t L1_BIT    = (1u << 10);  /* L1     = bit 10 */
 		const uint32_t R1_BIT    = (1u << 11);  /* R1     = bit 11 */
 		const uint32_t L2_BIT    = (1u << 8);   /* L2     = bit 8  */
 		const uint32_t R2_BIT    = (1u << 9);   /* R2     = bit 9  */
@@ -744,7 +745,8 @@ static void pa_input_poll(void) {
 		 * that becomes a combo with another button (SELECT+R2 save, game
 		 * combos) is passed on from then, and a menu press never reaches it.
 		 * Buttons already held when the press began (right-stick drift shows
-		 * up as A/B/X/Y) don't make it a combo. In 1, SELECT+START held for a
+		 * up as A/B/X/Y) don't make it a combo, and SELECT stays hidden for the
+		 * system shortcuts (SELECT+L1/R1/L2/R2). In 1, SELECT+START held for a
 		 * second also opens the menu, as a way out. SELECT+L1 is the
 		 * screenshot shortcut (plat_sdl.c). */
 		const int both = (raw & (SEL_BIT | START_BIT)) == (SEL_BIT | START_BIT);
@@ -754,7 +756,7 @@ static void pa_input_poll(void) {
 		if (g_game_keys == 1) {
 			static uint32_t hold_bit = 0, hold_others = 0;
 			static long long hold_down_ms = -1, pair_ms = -1;
-			static int hold_state = 0;   /* 0 deciding, 1 passed on, 2 used */
+			static int hold_state = 0;   /* 0 deciding, 1 passed on, 2 used, 3 shortcut */
 			static int hold_up_polls = FN_RELEASE_POLLS;
 			if (both) {
 				key_withhold |= SEL_BIT | START_BIT;
@@ -771,7 +773,10 @@ static void pa_input_poll(void) {
 			if (hold_bit && (pressed & hold_bit)) {
 				hold_up_polls = 0;
 				if (hold_state == 0) {
-					if (pressed & ~hold_bit & ~hold_others) {
+					uint32_t added = pressed & ~hold_bit & ~hold_others;
+					if (hold_bit == SEL_BIT && (added & (L1_BIT | R1_BIT | L2_BIT | R2_BIT))) {
+						hold_state = 3;   /* SELECT+L1/R1/L2/R2: a system shortcut */
+					} else if (added) {
 						hold_state = 1;   /* a combo: let the game have it */
 					} else if (now_ms - hold_down_ms >= FN_HOLD_MS) {
 						hold_state = 2;
@@ -782,11 +787,11 @@ static void pa_input_poll(void) {
 							g_switcher_requested = 1;
 					}
 				}
-				if (hold_state == 0)
+				if (hold_state == 0 || hold_state == 3)
 					key_withhold |= hold_bit;
 			} else if (hold_bit) {
 				/* Same debounce as FN: a dropout is not a release. */
-				if (hold_state == 0)
+				if (hold_state == 0 || hold_state == 3)
 					key_withhold |= hold_bit;
 				if (++hold_up_polls >= FN_RELEASE_POLLS) {
 					if (hold_state == 0)

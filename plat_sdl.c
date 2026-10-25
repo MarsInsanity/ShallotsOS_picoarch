@@ -1192,6 +1192,20 @@ int sf3000_fn_combo_probe(void)
 	return sig;
 }
 
+/* cubevol's stored raw backlight (persistentmem slot 30), or -1. */
+int sf3000_backlight_raw(void)
+{
+	int light = 0, ret = -1;
+	int fd = open("/dev/persistentmem", O_RDONLY);
+	if (fd < 0)
+		return -1;
+	struct sf3000_pmem_req bl = { 1, 30, 1, 0, &light };
+	if (ioctl(fd, SF3000_PMEM_GET, &bl) == 0)
+		ret = light & 0xFF;
+	close(fd);
+	return ret;
+}
+
 /* Store the shared volume AND mirror it to the I2SO hardware path, exactly
  * like a cubevol button press does.  Also refresh sndgain.txt so legacy
  * standalone frontends (pcsx4all, lgpt) still see a consistent level.
