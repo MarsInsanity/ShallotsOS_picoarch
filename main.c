@@ -227,11 +227,12 @@ static void clear_last_game(void) {
 }
 
 /* ---- GameSwitcher ---------------------------------------------------------
- * Holding FN in a game suspends it into a hidden state slot (the menu shows
- * slots 0-7 and Auto-Save/Auto-Load uses 9) and returns to FrogUI, which opens
- * its GameSwitcher. Launching a suspended game resumes it once. Leaving a game
- * any other way discards the suspend state, so it starts normally next time.
- * SWITCHER_FLAG tells FrogUI that it was entered from a game. */
+ * Holding FN in a game suspends it into state slot 10 (the menu's "Switcher"
+ * slot; Auto-Save/Auto-Load uses 9) and returns to FrogUI, which opens its
+ * GameSwitcher. Launching a suspended game resumes it once: a ".resume"
+ * marker next to the state says a resume is due. Leaving a game any other way
+ * drops the marker, so it starts normally next time; the state itself stays
+ * loadable from the menu. SWITCHER_FLAG tells FrogUI it was entered from a game. */
 #define SWITCHER_SLOT 10
 #define SWITCHER_FLAG "/tmp/shallotsos_from_game"
 int g_switcher_enabled = 1;      /* FrogUI's Game Switcher setting */
@@ -247,10 +248,17 @@ static void switcher_state_path(char *out, size_t size, const char *suffix) {
 
 static void switcher_discard(void) {
 	char path[MAX_PATH];
-	switcher_state_path(path, sizeof path, NULL);
+	switcher_state_path(path, sizeof path, ".resume");
 	unlink(path);
-	switcher_state_path(path, sizeof path, ".bmp");
-	unlink(path);
+}
+
+/* A suspend state was just written: resume it on the next launch. */
+static void switcher_mark_resume(void) {
+	char path[MAX_PATH];
+	switcher_state_path(path, sizeof path, ".resume");
+	FILE *f = fopen(path, "w");
+	if (f)
+		fclose(f);
 }
 
 static void switcher_suspend(void) {
@@ -261,6 +269,8 @@ static void switcher_suspend(void) {
 	state_slot = SWITCHER_SLOT;
 	g_suspended = state_allowed() && pa_state_write() == 0;
 	state_slot = prev;
+	if (g_suspended)
+		switcher_mark_resume();
 	plat_video_menu_leave();
 	sram_write();
 	sync();
@@ -328,6 +338,7 @@ static void power_suspend(const char *rom) {
 	state_slot = prev;
 	sram_write();
 	if (g_suspended) {
+		switcher_mark_resume();
 		FILE *f = fopen(POWER_RESUME_FILE, "w");
 		if (f) {
 			fprintf(f, "%s\n%s\n", core_path, rom);
@@ -1922,8 +1933,10 @@ int main(int argc, char **argv) {
 #ifdef PLATFORM_SF3000
 	if (!g_is_frogui) {
 		char suspend_path[MAX_PATH];
-		switcher_state_path(suspend_path, sizeof suspend_path, NULL);
-		if (access(suspend_path, F_OK) == 0) {
+		switcher_state_path(suspend_path, sizeof suspend_path, ".resume");
+		char state_path[MAX_PATH];
+		switcher_state_path(state_path, sizeof state_path, NULL);
+		if (access(suspend_path, F_OK) == 0 && access(state_path, F_OK) == 0) {
 			resume_slot = SWITCHER_SLOT;
 			g_resume_suspend = 1;
 			DBG("DBG switcher: resuming suspend state\n");

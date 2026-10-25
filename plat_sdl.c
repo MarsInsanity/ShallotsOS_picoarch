@@ -2627,6 +2627,80 @@ static void sf3000_hw_present_frame(const void *src, int w, int h, int pitch,
     if (!(sf3000_is_r36sx() && hwdisp_present_direct(src, w, h, pitch)))
         hwdisp_present(src, w, h, pitch);
 }
+/* ---- HUD card -------------------------------------------------------------
+ * The FPS / CPU readout (and other HUD messages) as a dark rounded card in
+ * the menu's TTF font, like the in-game toast. It is drawn into the game's
+ * own frame, which the display hardware scales to the panel, so the font is
+ * sized to the frame height. Built once per message, then blitted. */
+#include "menu_font.h"
+static uint16_t *hud_px;
+static uint8_t *hud_a;
+static int hud_w, hud_h, hud_for_h = -1;
+static char hud_for[64];
+
+static int hud_card_build(const char *msg, int frame_h) {
+    char t[64];
+    int n = 0, spaces = 0;
+    for (const char *c = msg; *c && n < (int)sizeof t - 1; c++) {
+        if (*c == ' ') { if (++spaces > 3) continue; }
+        else spaces = 0;
+        t[n++] = *c;
+    }
+    while (n > 0 && t[n - 1] == ' ') n--;
+    t[n] = '\0';
+    if (frame_h == hud_for_h && !strcmp(t, hud_for)) return hud_w > 0;
+    snprintf(hud_for, sizeof hud_for, "%s", t);
+    hud_for_h = frame_h;
+    hud_w = hud_h = 0;
+    if (!n || !menu_font_ready()) return 0;
+    float px = 20.0f * frame_h / 480;
+    if (px < 9) px = 9;
+    int prev = menu_font_height();
+    menu_font_set_px(px);
+    int tw = menu_font_measure(t), pad = (int)(px * 0.7f) + 1;
+    int w = tw + pad * 2, h = (int)(px * 1.8f) + 1;
+    free(hud_px); free(hud_a);
+    hud_px = calloc((size_t)w * h, sizeof *hud_px);
+    hud_a = malloc((size_t)w * h);
+    if (hud_px && hud_a) {
+        int baseline, cap;
+        menu_font_cap_metrics(&baseline, &cap);
+        menu_font_draw_text(hud_px, w, h, pad, h / 2 - (baseline - cap / 2), t, 0xFFFF);
+        int r = h / 3;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                int dx = x < r ? r - x : (x >= w - r ? x - (w - r - 1) : 0);
+                int dy = y < r ? r - y : (y >= h - r ? y - (h - r - 1) : 0);
+                hud_a[y * w + x] = dx * dx + dy * dy > r * r ? 0
+                                 : hud_px[y * w + x] ? 255 : 210;
+            }
+        hud_w = w; hud_h = h;
+    }
+    menu_font_set_px(prev > 0 ? (float)prev : 22.0f);
+    return hud_w > 0;
+}
+
+/* Returns 0 when there is no TTF, so the caller draws the bitmap HUD. */
+static int hud_card_draw(uint16_t *buf, int width, int height, const char *msg) {
+    if (!hud_card_build(msg, height)) return 0;
+    int m = height / 60 + 2;
+    for (int y = 0; y < hud_h && m + y < height; y++) {
+        uint16_t *d = buf + (size_t)(m + y) * width + m;
+        const uint16_t *sp = hud_px + (size_t)y * hud_w;
+        const uint8_t *ap = hud_a + (size_t)y * hud_w;
+        for (int x = 0; x < hud_w && m + x < width; x++) {
+            unsigned a = ap[x];
+            if (a == 255) d[x] = sp[x];
+            else if (a) {
+                unsigned k = 255 - a, c = d[x];
+                d[x] = (uint16_t)(((((c >> 11) & 31) * k / 255) << 11) |
+                                  ((((c >> 5) & 63) * k / 255) << 5) | ((c & 31) * k / 255));
+            }
+        }
+    }
+    return 1;
+}
+
 /* Screenshot: dump the current RGB565 frame to a top-down 24bpp BMP. */
 static void sf3000_screenshot(const void *src, int w, int h, int pitch) {
     if (!src || w <= 0 || h <= 0) return;
@@ -2901,6 +2975,7 @@ if (sf3000_use_hwdisp) {
                  * scale looks huge on low-res cores. Scale with buffer height so
                  * the on-panel size stays ~constant (≈ the menu font). */
                 int len = 0; while (msg[len]) len++;
+                if (hud_card_draw(compose_buf, width, height, msg)) len = 0;
                 /* The HUD msg is space-padded to a fixed width (fps left / cpu
                  * right), so size the bar to the last non-space glyph — otherwise
                  * it stretches across the whole screen. */
@@ -2908,7 +2983,7 @@ if (sf3000_use_hwdisp) {
                 int ts = height / 120; if (ts < 1) ts = 1;
                 int tx = 4, ty = 4;
                 /* Background bar */
-                int bw = vis * 8 * ts + 4;
+                int bw = vis ? vis * 8 * ts + 4 : 0;
                 int bh = 8 * ts + 4;
                 for (int by = 0; by < bh && (ty + by) < height; by++) {
                     uint16_t *r = compose_buf + (size_t)(ty + by) * width + tx;
