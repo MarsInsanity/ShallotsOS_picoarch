@@ -288,9 +288,12 @@ static void switcher_suspend(void) {
 static volatile uint32_t *power_gpio;
 
 static void power_watch_init(void) {
-	const char *dev = getenv("TF_DEVICE");
-	if (dev && !strcasecmp(dev, "SF3000"))
-		return;   /* a real power switch: nothing to watch */
+	/* Pin 14 is the power button only where it was verified, the R36SX
+	 * family. The SF3000 has a real power switch, and the other consoles'
+	 * pins are unknown, so nothing is watched there. */
+	extern int sf3000_is_r36sx(void);
+	if (!sf3000_is_r36sx())
+		return;
 	int fd = open("/dev/mem", O_RDONLY | O_SYNC);
 	if (fd < 0)
 		return;

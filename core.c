@@ -706,10 +706,14 @@ static void pa_input_poll(void) {
 		extern int g_switcher_enabled, g_switcher_requested;
 		extern int sf3000_fn_combo_probe(void);
 		extern int g_game_keys;   /* FrogUI "In-game Menu Keys", see below */
+		extern int sf3000_has_fn; /* only the R36SX family has an FN button */
+		/* Without FN (SF3000, SF3500, GB350) the FN layout would leave no way
+		 * to the GameSwitcher: use SELECT+START, tap = menu, hold = switcher. */
+		const int game_keys = (g_game_keys == 0 && !sf3000_has_fn) ? 2 : g_game_keys;
 		static long long fn_down_ms = -1, fn_probe_ms = 0;
 		static int fn_hold_fired = 0, fn_up_polls = 0, fn_combo = 0, fn_sig = -1;
 		int fn_tap = 0;
-		if (g_game_keys != 0) {
+		if (game_keys != 0) {
 			fn_down_ms = -1;   /* FN is left to the system shortcuts */
 		} else if (raw & FN_BIT) {
 			long long now = mono_ms();
@@ -758,7 +762,7 @@ static void pa_input_poll(void) {
 		const uint32_t pressed = raw & 0xFFFFu;
 		long long now_ms = mono_ms();
 		int hold_menu = 0;
-		if (g_game_keys == 1) {
+		if (game_keys == 1) {
 			static uint32_t hold_bit = 0, hold_others = 0;
 			static long long hold_down_ms = -1, pair_ms = -1;
 			static int hold_state = 0;   /* 0 deciding, 1 passed on, 2 used, 3 shortcut */
@@ -813,7 +817,7 @@ static void pa_input_poll(void) {
 				hold_up_polls = 0;
 				key_withhold |= hold_bit;
 			}
-		} else if (g_game_keys == 2) {
+		} else if (game_keys == 2) {
 			static long long pair_down_ms = -1, solo_ms = -1;
 			static int pair_fired = 0, pair_up_polls = 0, solo_passed = 0;
 			static uint32_t solo_bit = 0;
@@ -853,7 +857,7 @@ static void pa_input_poll(void) {
 				}
 			}
 		}
-		if (menu_armed && ((g_game_keys == 0 && both) || fn_tap || hold_menu)) {
+		if (menu_armed && ((game_keys == 0 && both) || fn_tap || hold_menu)) {
 			menu_armed = 0;
 			menu_off_cnt = 0;
 			handle_emu_action(EACTION_MENU);
