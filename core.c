@@ -628,6 +628,18 @@ static long long mono_ms(void) {
 	return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
 #define FN_HOLD_MS 600   /* hold FN this long for the GameSwitcher */
+#define PAIR_WAIT_MS 120 /* SELECT+START layout: wait this long for the partner */
+#define KEY_TAP_MS 80    /* a replayed tap is held this long */
+
+/* SELECT/START presses held back from the game this poll (raw bits), and
+ * taps replayed to it after a held-back press turned out to be a tap. */
+static uint32_t key_withhold;
+static long long key_tap_until[2];   /* [0] SELECT, [1] START */
+
+static void key_tap(uint32_t bits, long long now) {
+	if (bits & (1u << 0)) key_tap_until[0] = now + KEY_TAP_MS;
+	if (bits & (1u << 3)) key_tap_until[1] = now + KEY_TAP_MS;
+}
 #define FN_PROBE_MS 80   /* how often to check for FN+volume while FN is held */
 #define FN_RELEASE_POLLS 3 /* FN must read released this many polls in a row */
 #endif
@@ -644,6 +656,7 @@ static void pa_input_poll(void) {
 
 	if (sf3000_keys_ptr) {
 		uint32_t raw = sf3000_keys_filtered;  /* race-filtered (see plat_sdl.c) */
+		key_withhold = 0;
 		static uint32_t prev_raw = 0;   /* for rising-edge combo detection */
 
 		/* Hardware hotkeys: FN tap or SELECT+START = menu, FN hold = GameSwitcher; SELECT+R2 save; SELECT+L2 load; SELECT+R1 fast-forward. */
@@ -723,61 +736,111 @@ static void pa_input_poll(void) {
 		/* FrogUI's "In-game Menu Keys" setting picks ONE way in:
 		 * 0: FN - tap = menu, hold = GameSwitcher (and SELECT+START = menu,
 		 *    the original default);
-		 * 1: hold SELECT = menu, hold START = GameSwitcher, each on its own
-		 *    (any other button makes it a combo, such as SELECT+R2); taps
-		 *    still reach the game;
-		 * 2: SELECT+START - tap = menu, hold = GameSwitcher. The pair is kept
-		 *    from the game while held (PCE soft-resets on Run+Select).
-		 * (SELECT+L1 is the screenshot shortcut in plat_sdl.c.) */
+		 * 1: hold SELECT = menu, hold START = GameSwitcher;
+		 * 2: SELECT+START - tap = menu, hold = GameSwitcher.
+		 * Games use SELECT and START too (Kirby drops its power-up on SELECT),
+		 * so in 1 and 2 the press is held back from the game until it is
+		 * clear what it is: a tap is replayed to the game on release, a press
+		 * that becomes a combo with another button (SELECT+R2 save, game
+		 * combos) is passed on from then, and a menu press never reaches it.
+		 * Buttons already held when the press began (right-stick drift shows
+		 * up as A/B/X/Y) don't make it a combo. In 1, SELECT+START held for a
+		 * second also opens the menu, as a way out. SELECT+L1 is the
+		 * screenshot shortcut (plat_sdl.c). */
 		const int both = (raw & (SEL_BIT | START_BIT)) == (SEL_BIT | START_BIT);
-		static long long hold_down_ms = -1;
-		static uint32_t hold_bit = 0;
-		static int hold_used = 0, hold_up_polls = FN_RELEASE_POLLS;
+		const uint32_t pressed = raw & 0xFFFFu;
+		long long now_ms = mono_ms();
 		int hold_menu = 0;
 		if (g_game_keys == 1) {
-			uint32_t pressed = raw & 0xFFFFu;
-			if (hold_bit && (pressed & hold_bit)) {
-				long long now = mono_ms();
-				hold_up_polls = 0;
-				if (pressed & ~hold_bit)
-					hold_used = 1;          /* part of a combo */
-				if (!hold_used && now - hold_down_ms >= FN_HOLD_MS) {
-					hold_used = 1;
-					if (hold_bit == SEL_BIT)
-						hold_menu = 1;
-					else if (g_switcher_enabled)
-						g_switcher_requested = 1;
+			static uint32_t hold_bit = 0, hold_others = 0;
+			static long long hold_down_ms = -1, pair_ms = -1;
+			static int hold_state = 0;   /* 0 deciding, 1 passed on, 2 used */
+			static int hold_up_polls = FN_RELEASE_POLLS;
+			if (both) {
+				key_withhold |= SEL_BIT | START_BIT;
+				if (pair_ms < 0)
+					pair_ms = now_ms;
+				else if (now_ms - pair_ms >= 1000 && hold_state != 2) {
+					hold_menu = 1;   /* the way out */
+					hold_state = 2;
+					suppress_menu_buttons = 1;
 				}
 			} else {
+				pair_ms = -1;
+			}
+			if (hold_bit && (pressed & hold_bit)) {
+				hold_up_polls = 0;
+				if (hold_state == 0) {
+					if (pressed & ~hold_bit & ~hold_others) {
+						hold_state = 1;   /* a combo: let the game have it */
+					} else if (now_ms - hold_down_ms >= FN_HOLD_MS) {
+						hold_state = 2;
+						suppress_menu_buttons = 1;
+						if (hold_bit == SEL_BIT)
+							hold_menu = 1;
+						else if (g_switcher_enabled)
+							g_switcher_requested = 1;
+					}
+				}
+				if (hold_state == 0)
+					key_withhold |= hold_bit;
+			} else if (hold_bit) {
 				/* Same debounce as FN: a dropout is not a release. */
-				if (!(pressed & (SEL_BIT | START_BIT)) && hold_up_polls < FN_RELEASE_POLLS &&
-				    ++hold_up_polls >= FN_RELEASE_POLLS)
+				if (hold_state == 0)
+					key_withhold |= hold_bit;
+				if (++hold_up_polls >= FN_RELEASE_POLLS) {
+					if (hold_state == 0)
+						key_tap(hold_bit, now_ms);   /* it was a tap */
 					hold_bit = 0;
-				if (!hold_bit && hold_up_polls >= FN_RELEASE_POLLS &&
-				    (pressed == SEL_BIT || pressed == START_BIT)) {
-					hold_bit = pressed;
-					hold_down_ms = mono_ms();
-					hold_used = 0;
-					hold_up_polls = 0;
 				}
 			}
+			if (!hold_bit && (pressed & (SEL_BIT | START_BIT)) && !(pressed & SEL_BIT && pressed & START_BIT) &&
+			    !suppress_menu_buttons) {
+				hold_bit = pressed & (SEL_BIT | START_BIT);
+				hold_others = pressed & ~hold_bit;
+				hold_down_ms = now_ms;
+				hold_state = 0;
+				hold_up_polls = 0;
+				key_withhold |= hold_bit;
+			}
 		} else if (g_game_keys == 2) {
-			static long long pair_down_ms = -1;
-			static int pair_fired = 0, pair_up_polls = 0;
+			static long long pair_down_ms = -1, solo_ms = -1;
+			static int pair_fired = 0, pair_up_polls = 0, solo_passed = 0;
+			static uint32_t solo_bit = 0;
 			if (both) {
-				long long now = mono_ms();
 				pair_up_polls = 0;
 				suppress_menu_buttons = 1;
+				solo_bit = 0;
 				if (pair_down_ms < 0) {
-					pair_down_ms = now;
+					pair_down_ms = now_ms;
 					pair_fired = 0;
-				} else if (!pair_fired && g_switcher_enabled && now - pair_down_ms >= FN_HOLD_MS) {
+				} else if (!pair_fired && g_switcher_enabled && now_ms - pair_down_ms >= FN_HOLD_MS) {
 					pair_fired = 1;
 					g_switcher_requested = 1;
 				}
-			} else if (pair_down_ms >= 0 && ++pair_up_polls >= FN_RELEASE_POLLS) {
-				hold_menu = !pair_fired;
-				pair_down_ms = -1;
+			} else if (pair_down_ms >= 0) {
+				if (++pair_up_polls >= FN_RELEASE_POLLS) {
+					hold_menu = !pair_fired;
+					pair_down_ms = -1;
+				}
+			} else if (!suppress_menu_buttons) {
+				/* A lone SELECT or START waits briefly for its partner. */
+				uint32_t one = pressed & (SEL_BIT | START_BIT);
+				if (one) {
+					if (!solo_bit) {
+						solo_bit = one;
+						solo_ms = now_ms;
+						solo_passed = 0;
+					}
+					if (!solo_passed && now_ms - solo_ms >= PAIR_WAIT_MS)
+						solo_passed = 1;
+					if (!solo_passed)
+						key_withhold |= solo_bit;
+				} else if (solo_bit) {
+					if (!solo_passed)
+						key_tap(solo_bit, now_ms);
+					solo_bit = 0;
+				}
 			}
 		}
 		if (menu_armed && ((g_game_keys == 0 && both) || fn_tap || hold_menu)) {
@@ -825,6 +888,18 @@ static void pa_input_poll(void) {
 			             (1u << RETRO_DEVICE_ID_JOYPAD_START));
 			if (!(raw & (SEL_BIT | START_BIT)))
 				suppress_menu_buttons = 0;
+		}
+		/* In-game Menu Keys: held-back presses and replayed taps. */
+		if (key_withhold & SEL_BIT)
+			buttons &= ~(1u << RETRO_DEVICE_ID_JOYPAD_SELECT);
+		if (key_withhold & START_BIT)
+			buttons &= ~(1u << RETRO_DEVICE_ID_JOYPAD_START);
+		{
+			long long now_ms2 = mono_ms();
+			if (now_ms2 < key_tap_until[0])
+				buttons |= 1u << RETRO_DEVICE_ID_JOYPAD_SELECT;
+			if (now_ms2 < key_tap_until[1])
+				buttons |= 1u << RETRO_DEVICE_ID_JOYPAD_START;
 		}
 frogui_no_hotkeys: ;
 	} else {
