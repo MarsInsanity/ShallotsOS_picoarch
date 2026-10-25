@@ -3,6 +3,7 @@
 #include "main.h"
 #include "menu.h"
 #include "menu_font.h"
+#include "frogui_settings.h"
 #include "i18n.h"
 #include "options.h"
 #include "overrides.h"
@@ -981,6 +982,16 @@ void menu_end(void)
 /* ------------------------- MinUI-style main pause menu ------------------------- */
 
 
+static void minui_game_title(char *out, size_t n) {
+	const char *p = (content && content->path[0]) ? content->path : "";
+	const char *base = strrchr(p, '/');
+	base = base ? base + 1 : p;
+	snprintf(out, n, "%s", base);
+	char *dot = strrchr(out, '.');
+	if (dot && dot != out) *dot = '\0';
+	if (!out[0]) snprintf(out, n, "picoarch");
+}
+
 static void minui_fill(int x, int y, int w, int h, uint16_t c) {
 	uint16_t *fb = (uint16_t *)g_menuscreen_ptr;
 	if (x < 0) { w += x; x = 0; }
@@ -1049,8 +1060,9 @@ static int slot_shot_load(int slot) {
 
 /* A small filled triangle pointing left (dir < 0) or right. */
 static void minui_arrow(int cx, int cy, int size, int dir, uint16_t c) {
+	/* Column i from the tip: the tip is on the side it points to. */
 	for (int i = 0; i < size; i++) {
-		int half = (size - i) * 2 / 3;
+		int half = i * 2 / 3;
 		int x = dir < 0 ? cx - size / 2 + i : cx + size / 2 - i;
 		minui_fill(x, cy - half, 1, half * 2 + 1, c);
 	}
@@ -1072,6 +1084,29 @@ static int minui_hint(int x, int cy, int size, const char *btn, const char *labe
 	x += size + size / 4;
 	minui_text_mid(x, cy, label, 0xFFFF);
 	return x + menu_font_measure(label) + size;
+}
+
+/* Status bar over the Options and controls pages: the game's name on the
+ * left, room for the battery (drawn by menu_draw_end at the top right).
+ * Returns its height. */
+static int minui_status_bar(const char *title, uint16_t bg, uint16_t fg) {
+	int W = g_menuscreen_w, H = g_menuscreen_h;
+	int h = H * 40 / 480;
+	if (h < 22) h = 22;   /* the battery is 11 px tall at y = 6 */
+	minui_fill(0, 0, W, h, bg);
+	float px = h * 0.55f;
+	menu_font_set_px(px < 14 ? 14 : px);
+	char label[128];
+	snprintf(label, sizeof label, "%s", title);
+	int room = W - W / 32 - 48;
+	while (label[0] && menu_font_measure(label) > room) {
+		size_t len = strlen(label);
+		if (len <= 4) { label[0] = '\0'; break; }
+		label[len - 4] = '\0';
+		strcat(label, "...");
+	}
+	minui_text_mid(W / 32, h / 2, label, fg);
+	return h;
 }
 
 /* A list row's value text ("" when it has none); *can_change is set for
@@ -1120,8 +1155,15 @@ static void me_draw_miyoo(const menu_entry *entries, int sel, void (*draw_more)(
 	const uint16_t SEL_TEXT = (uint16_t)menu_sel_text_color;
 	const uint16_t PANEL = 0x18E3, FOOTER = 0x10A2, DIM = 0xA534;
 	int W = g_menuscreen_w, H = g_menuscreen_h;
-	int foot_h = H * 56 / 480, area_h = H - foot_h;
-	int rh = area_h / 7, pad = W / 32;
+	int foot_h = H * 56 / 480, top, area_h, rh, pad = W / 32;
+
+	plat_video_menu_begin();
+	minui_fill(0, 0, W, H, PANEL);
+	char game[128];
+	minui_game_title(game, sizeof game);
+	top = minui_status_bar(game, FOOTER, DIM);
+	area_h = H - foot_h - top;
+	rh = area_h / 6;
 
 	/* Visible rows, and the window that keeps the selection on screen. */
 	int vis[256], n = 0, sel_vis = 0;
@@ -1135,8 +1177,6 @@ static void me_draw_miyoo(const menu_entry *entries, int sel, void (*draw_more)(
 	if (first > n - per_page) first = n - per_page;
 	if (first < 0) first = 0;
 
-	plat_video_menu_begin();
-	minui_fill(0, 0, W, H, PANEL);
 	float px = rh * 0.42f;
 	if (px < 18) px = 18;
 	if (px > 28) px = 28;
@@ -1144,7 +1184,7 @@ static void me_draw_miyoo(const menu_entry *entries, int sel, void (*draw_more)(
 
 	for (int r = 0; r < per_page && first + r < n; r++) {
 		const menu_entry *ent = &entries[vis[first + r]];
-		int on = vis[first + r] == sel, y = r * rh;
+		int on = vis[first + r] == sel, y = top + r * rh;
 		uint16_t tc = on ? SEL_TEXT : 0xFFFF;
 		if (on)
 			minui_fill(0, y, W, rh, ACCENT);
@@ -1179,8 +1219,8 @@ static void me_draw_miyoo(const menu_entry *entries, int sel, void (*draw_more)(
 	}
 
 	/* Hint bar; a message (or the row's help) takes it over for a while. */
-	minui_fill(0, area_h, W, foot_h, FOOTER);
-	int cy = area_h + foot_h / 2, bsz = foot_h * 6 / 10;
+	minui_fill(0, H - foot_h, W, foot_h, FOOTER);
+	int cy = H - foot_h / 2, bsz = foot_h * 6 / 10;
 	const char *note = menu_error_msg[0] ? menu_error_msg : NULL;
 	if (note && plat_get_ticks_ms() - menu_error_time > 2048)
 		menu_error_msg[0] = 0, note = NULL;
@@ -1216,15 +1256,18 @@ static void keys_draw_miyoo(const struct me_bind_action *opts_, int opt_cnt, int
 	const uint16_t SEL_TEXT = (uint16_t)menu_sel_text_color;
 	const uint16_t PANEL = 0x18E3, FOOTER = 0x10A2, DIM = 0xA534;
 	int W = g_menuscreen_w, H = g_menuscreen_h;
-	int foot_h = H * 56 / 480, area_h = H - foot_h;
-	int rh = area_h / 8, pad = W / 32;
+	int foot_h = H * 56 / 480, pad = W / 32;
+
+	plat_video_menu_begin();
+	minui_fill(0, 0, W, H, PANEL);
+	char game[128];
+	minui_game_title(game, sizeof game);
+	int top = minui_status_bar(game, FOOTER, DIM);
+	int area_h = H - foot_h - top, rh = area_h / 7;
 	int per_page = area_h / rh - 1;   /* the first row is the title */
 	int first = sel - per_page / 2;
 	if (first > opt_cnt - per_page) first = opt_cnt - per_page;
 	if (first < 0) first = 0;
-
-	plat_video_menu_begin();
-	minui_fill(0, 0, W, H, PANEL);
 	float px = rh * 0.42f;
 	if (px < 18) px = 18;
 	if (px > 26) px = 26;
@@ -1235,14 +1278,14 @@ static void keys_draw_miyoo(const struct me_bind_action *opts_, int opt_cnt, int
 		snprintf(title, sizeof title, tr_or("pico.keys.player", "Player %d controls"), player_idx + 1);
 	else
 		snprintf(title, sizeof title, "%s", tr_or("pico.keys.emulator", "Emulator controls"));
-	minui_text_mid(pad, rh / 2, title, ACCENT);
+	minui_text_mid(pad, top + rh / 2, title, ACCENT);
 	if (opt_cnt > per_page) {
 		char pos[24];
 		snprintf(pos, sizeof pos, "%d/%d", sel + 1, opt_cnt);
-		minui_text_mid(W - pad - menu_font_measure(pos), rh / 2, pos, DIM);
+		minui_text_mid(W - pad - menu_font_measure(pos), top + rh / 2, pos, DIM);
 	}
 	for (int r = 0; r < per_page && first + r < opt_cnt; r++) {
-		int i = first + r, y = (r + 1) * rh, on = i == sel;
+		int i = first + r, y = top + (r + 1) * rh, on = i == sel;
 		uint16_t tc = on ? SEL_TEXT : 0xFFFF;
 		if (on)
 			minui_fill(0, y, W, rh, ACCENT);
@@ -1252,8 +1295,8 @@ static void keys_draw_miyoo(const struct me_bind_action *opts_, int opt_cnt, int
 		minui_text_mid(W - pad - bw, y + rh / 2, bind, on ? tc : DIM);
 	}
 
-	minui_fill(0, area_h, W, foot_h, FOOTER);
-	int cy = area_h + foot_h / 2, bsz = foot_h * 6 / 10;
+	minui_fill(0, H - foot_h, W, foot_h, FOOTER);
+	int cy = H - foot_h / 2, bsz = foot_h * 6 / 10;
 	if (is_bind) {
 		minui_text_mid(pad, cy, tr_or("pico.keys.press", "Press a button to bind or unbind"), 0xFFFF);
 	} else {
@@ -1462,8 +1505,19 @@ int menu_init(void)
 	/* Load FrogUI's TTF for the menu (no-op + bitmap fallback if unavailable),
 	 * then the OnionOS theme's font when FrogUI passed one in skin.txt. */
 	menu_font_init((float)MENU_TTF_PX);
-	if (menu_skin_font[0] && menu_font_ready())
-		menu_font_use_face(menu_skin_font);
+	dbg_log("DBG menu: ttf=%d skin font='%s' onion_theme off=%d\n", menu_font_ready(),
+	        menu_skin_font, frogui_setting_is("onion_theme", "off"));
+	if (menu_font_ready() && !frogui_setting_is("onion_theme", "off")) {
+		/* The theme's font from skin.txt, else ShallotsOS's own Exo 2. */
+		const char *faces[] = { menu_skin_font,
+		                        "/mnt/sdcard/frogui/onion/fonts/Exo-2-Bold-Italic.ttf" };
+		int ok = 0;
+		for (int i = 0; i < 2 && !ok; i++) {
+			if (!faces[i][0]) continue;
+			ok = menu_font_use_face(faces[i]);
+			dbg_log("DBG menu: font %s %s\n", faces[i], ok ? "loaded" : "failed");
+		}
+	}
 
 	return 0;
 }
