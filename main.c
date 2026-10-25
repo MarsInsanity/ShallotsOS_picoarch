@@ -166,6 +166,7 @@ static void apply_brightness(int level) {
 	DBG("DBG apply_brightness: level=%d -> %d\n", level, out);
 }
 extern int g_switcher_enabled;   /* defined with the GameSwitcher code below */
+int g_game_keys = 0;   /* FrogUI "game_keys": 0 = FN, 1 = hold SELECT/START, 2 = combos */
 static void load_frogui_settings(void) {
 	/* filter: FrogUI's choice is only the DEFAULT: if this game has its own
 	 * config (config_override), its in-menu Filter choice wins, so don't
@@ -181,6 +182,8 @@ static void load_frogui_settings(void) {
 	g_stock_battery    = !frogui_setting_is("stock_battery", "off");
 	g_brightness       = frogui_setting_int("brightness", -1);   /* applied on game path only */
 	g_switcher_enabled = !frogui_setting_is("game_switcher", "off");
+	g_game_keys = frogui_setting_is("game_keys", "hold") ? 1
+	            : frogui_setting_is("game_keys", "combo") ? 2 : 0;
 	DBG("DBG load_frogui_settings: quick_resume=%d autosave_autoload=%d stock_battery=%d\n",
 	        g_quick_resume, g_autosave_autoload, g_stock_battery);
 }

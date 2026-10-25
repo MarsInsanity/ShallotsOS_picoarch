@@ -717,7 +717,48 @@ static void pa_input_poll(void) {
 			fn_tap = !fn_hold_fired && !fn_combo;
 			fn_down_ms = -1;
 		}
-		if (menu_armed && (((raw & (SEL_BIT | START_BIT)) == (SEL_BIT | START_BIT)) || fn_tap)) {
+		/* FrogUI's "In-game Menu Keys" setting adds a second way in, next to
+		 * FN. 1: hold SELECT for the menu or START for the GameSwitcher, on
+		 * its own (any other button makes it a combo, such as SELECT+R2);
+		 * taps still reach the game. 2: SELECT+L1 opens the GameSwitcher
+		 * (SELECT+START opens the menu in every mode). */
+		extern int g_game_keys;
+		const uint32_t L1_BIT = (1u << 10);  /* L1 = bit 10 */
+		static long long hold_down_ms = -1;
+		static uint32_t hold_bit = 0;
+		static int hold_used = 0, hold_up_polls = FN_RELEASE_POLLS;
+		int hold_menu = 0;
+		if (g_game_keys == 1) {
+			uint32_t pressed = raw & 0xFFFFu;
+			if (hold_bit && (pressed & hold_bit)) {
+				long long now = mono_ms();
+				hold_up_polls = 0;
+				if (pressed & ~hold_bit)
+					hold_used = 1;          /* part of a combo */
+				if (!hold_used && now - hold_down_ms >= FN_HOLD_MS) {
+					hold_used = 1;
+					if (hold_bit == SEL_BIT)
+						hold_menu = 1;
+					else if (g_switcher_enabled)
+						g_switcher_requested = 1;
+				}
+			} else {
+				/* Same debounce as FN: a dropout is not a release. */
+				if (!(pressed & (SEL_BIT | START_BIT)) && hold_up_polls < FN_RELEASE_POLLS &&
+				    ++hold_up_polls >= FN_RELEASE_POLLS)
+					hold_bit = 0;
+				if (!hold_bit && hold_up_polls >= FN_RELEASE_POLLS &&
+				    (pressed == SEL_BIT || pressed == START_BIT)) {
+					hold_bit = pressed;
+					hold_down_ms = mono_ms();
+					hold_used = 0;
+					hold_up_polls = 0;
+				}
+			}
+		} else if (g_game_keys == 2 && g_switcher_enabled && COMBO_EDGE(SEL_BIT | L1_BIT)) {
+			g_switcher_requested = 1;
+		}
+		if (menu_armed && (((raw & (SEL_BIT | START_BIT)) == (SEL_BIT | START_BIT)) || fn_tap || hold_menu)) {
 			menu_armed = 0;
 			menu_off_cnt = 0;
 			handle_emu_action(EACTION_MENU);
