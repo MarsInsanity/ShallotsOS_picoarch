@@ -1032,19 +1032,63 @@ static void minui_thumb(const uint16_t *src, int sw, int sh, int spp,
  * shows that slot's screenshot, or "Empty". */
 #define MAIN_SLOT_ROW(id) ((id) == MA_MAIN_SAVE_STATE || (id) == MA_MAIN_LOAD_STATE)
 
+/* Slot positions shown in the menu: 0 = Auto (Auto-Save, file slot 9),
+ * 1 = Switcher (GameSwitcher / power-off save, file slot 10), then user
+ * slots 1-30. User slots 1-8 keep their original files (.st0-.st7) and 9-30
+ * use .st11-.st32, so the two system slots stay where FrogUI and the power
+ * code expect them and no save needs moving. Load offers every position,
+ * Save only the user slots. */
+#define MENU_USER_SLOTS 30
+#define SLOT_POS_AUTO 0
+#define SLOT_POS_SWITCHER 1
+#define SLOT_POS_FIRST_USER 2
+#define SLOT_POSITIONS (SLOT_POS_FIRST_USER + MENU_USER_SLOTS)
+
+static int slot_used[SLOT_POSITIONS];
+static int save_pos = SLOT_POS_FIRST_USER, load_pos = SLOT_POS_FIRST_USER;
+
+static int slot_file(int pos) {
+	if (pos == SLOT_POS_AUTO) return 9;
+	if (pos == SLOT_POS_SWITCHER) return 10;
+	int user = pos - SLOT_POS_FIRST_USER + 1;   /* 1..30 */
+	return user <= 8 ? user - 1 : user + 2;
+}
+
+/* The user-slot position of a file slot (state_slot), or -1. */
+static int slot_pos_of_file(int file) {
+	if (file >= 0 && file <= 7) return SLOT_POS_FIRST_USER + file;
+	if (file >= 11 && file <= 32) return SLOT_POS_FIRST_USER + file - 3;
+	return -1;
+}
+
+static void slots_scan(void) {
+	for (int pos = 0; pos < SLOT_POSITIONS; pos++)
+		slot_used[pos] = emu_check_save_file(slot_file(pos), NULL);
+}
+
+static void slot_label(int pos, char *out, size_t size) {
+	if (pos == SLOT_POS_AUTO)
+		snprintf(out, size, "%s", tr_or("pico.menu.slot_auto", "Auto"));
+	else if (pos == SLOT_POS_SWITCHER)
+		snprintf(out, size, "%s", tr_or("pico.menu.slot_switcher", "Switcher"));
+	else
+		snprintf(out, size, "%d", pos - SLOT_POS_FIRST_USER + 1);
+}
+
 /* The slot's screenshot, cached until the slot or the files change. */
 static uint16_t *slot_shot;
 static int slot_shot_w, slot_shot_h, slot_shot_for = -2;
 
 static void slot_shot_invalidate(void) { slot_shot_for = -2; }
 
-static int slot_shot_load(int slot) {
-	if (slot_shot_for == slot)
+static int slot_shot_load(int pos) {
+	if (slot_shot_for == pos)
 		return slot_shot != NULL && slot_shot_w > 0;
-	slot_shot_for = slot;
+	slot_shot_for = pos;
 	slot_shot_w = slot_shot_h = 0;
-	if (!(state_slot_flags & (1 << slot)))
+	if (!slot_used[pos])
 		return 0;
+	int slot = slot_file(pos);
 	size_t cap = (size_t)g_menuscreen_w * g_menuscreen_h;
 	if (!slot_shot)
 		slot_shot = malloc(cap * 2);
@@ -1329,8 +1373,9 @@ static void minui_draw_main(menu_entry *menu, int sel) {
 	int bh = area_h, bw = bh * 4 / 3;
 	if (bw > W) { bw = W; bh = bw * 3 / 4; }
 	int bx = (W - bw) / 2, by = (area_h - bh) / 2;
+	int shown_pos = sel_id == MA_MAIN_SAVE_STATE ? save_pos : load_pos;
 	if (slot_row) {
-		if (slot_shot_load(state_slot))
+		if (slot_shot_load(shown_pos))
 			minui_thumb(slot_shot, slot_shot_w, slot_shot_h, slot_shot_w, bx, by, bw, bh);
 	} else {
 		minui_thumb((const uint16_t *)g_menubg_src_ptr, g_menubg_src_w, g_menubg_src_h,
@@ -1357,8 +1402,8 @@ static void minui_draw_main(menu_entry *menu, int sel) {
 		minui_text_mid(pad, y + rh / 2, e->name, tc);
 		if (MAIN_SLOT_ROW(e->id)) {
 			/* "<  1  >" at the right edge of the panel. */
-			char num[8];
-			snprintf(num, sizeof num, "%d", state_slot + 1);
+			char num[24];
+			slot_label(e->id == MA_MAIN_SAVE_STATE ? save_pos : load_pos, num, sizeof num);
 			int nw = menu_font_measure(num), a = rh / 4;
 			int right = panel_w - pad, cx = right - a - nw / 2 - a;
 			minui_arrow(right - a / 2, y + rh / 2, a, 1, tc);
@@ -1368,7 +1413,7 @@ static void minui_draw_main(menu_entry *menu, int sel) {
 		y += rh;
 	}
 
-	if (slot_row && !(state_slot_flags & (1 << state_slot))) {
+	if (slot_row && !slot_used[shown_pos]) {
 		const char *empty = tr_or("pico.menu.slot_empty", "Empty");
 		minui_text_mid(panel_w + (W - panel_w - menu_font_measure(empty)) / 2, area_h / 2, empty, DIM);
 	}
@@ -1398,8 +1443,14 @@ static int minui_main_loop(menu_entry *menu, int *menu_sel) {
 	int ret = 0, inp, sel = *menu_sel, smax = me_count(menu) - 1;
 	if (smax < 0) return 0;
 	while ((!menu[sel].enabled || !menu[sel].selectable) && sel < smax) sel++;
-	if (state_slot < 0 || state_slot >= STATE_SLOT_COUNT) state_slot = 0;
-	state_check_slots();
+	{
+		/* Start on the slot last saved to (state_slot, also used by the
+		 * SELECT+R2 / SELECT+L2 shortcuts). */
+		int pos = slot_pos_of_file(state_slot);
+		if (pos >= 0)
+			save_pos = load_pos = pos;
+	}
+	slots_scan();
 	slot_shot_invalidate();
 
 	minui_draw_main(menu, sel);
@@ -1421,28 +1472,49 @@ static int minui_main_loop(menu_entry *menu, int *menu_sel) {
 			while (!menu[sel].enabled || !menu[sel].selectable);
 		}
 		if ((inp & (PBTN_LEFT | PBTN_RIGHT)) && MAIN_SLOT_ROW(menu[sel].id)) {
-			state_slot += (inp & PBTN_RIGHT) ? 1 : STATE_SLOT_COUNT - 1;
-			state_slot %= STATE_SLOT_COUNT;
+			int step = (inp & PBTN_RIGHT) ? 1 : -1;
+			if (menu[sel].id == MA_MAIN_SAVE_STATE) {
+				/* Save: user slots 1-30 only, wrapping. */
+				save_pos += step;
+				if (save_pos < SLOT_POS_FIRST_USER) save_pos = SLOT_POSITIONS - 1;
+				if (save_pos >= SLOT_POSITIONS) save_pos = SLOT_POS_FIRST_USER;
+			} else {
+				load_pos = (load_pos + step + SLOT_POSITIONS) % SLOT_POSITIONS;
+			}
 		}
 		if (inp & PBTN_MOK) {
 			int id = menu[sel].id;
 			if (MAIN_SLOT_ROW(id)) {
 				/* Save or load the shown slot, then back to the game. */
-				char msg[64];
+				char msg[64], label[24];
 				int loading = id == MA_MAIN_LOAD_STATE;
-				if (loading && !(state_slot_flags & (1 << state_slot)))
+				int pos = loading ? load_pos : save_pos;
+				if (loading && !slot_used[pos])
 					continue;   /* nothing to load */
-				if (emu_save_load_game(loading, 0)) {
+				/* Auto and Switcher are loaded without becoming the slot the
+				 * SELECT+R2 shortcut saves to. */
+				int prev = state_slot;
+				state_slot = slot_file(pos);
+				int failed = emu_save_load_game(loading, 0);
+				if (pos < SLOT_POS_FIRST_USER)
+					state_slot = prev;
+				if (failed) {
 					snprintf(msg, sizeof msg, "%s", loading ? tr_or("pico.toast.load_failed", "Load failed")
 					                                        : tr_or("pico.toast.save_failed", "Save failed"));
 					pa_toast_later(msg);
-					state_check_slots();
+					slots_scan();
 					slot_shot_invalidate();
 					continue;
 				}
-				snprintf(msg, sizeof msg, loading ? tr_or("pico.toast.loaded", "Loaded slot %d")
-				                                  : tr_or("pico.toast.saved", "Saved to slot %d"),
-				         state_slot + 1);
+				slot_label(pos, label, sizeof label);
+				if (!loading)
+					snprintf(msg, sizeof msg, tr_or("pico.toast.saved", "Saved to slot %s"), label);
+				else if (pos < SLOT_POS_FIRST_USER)
+					snprintf(msg, sizeof msg, tr_or("pico.toast.loaded_special", "Loaded %s"), label);
+				else
+					snprintf(msg, sizeof msg, tr_or("pico.toast.loaded", "Loaded slot %s"), label);
+				if (!loading)
+					load_pos = pos;
 				pa_toast_later(msg);
 				ret = 1;
 				break;

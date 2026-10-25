@@ -269,8 +269,13 @@ error:
 int state_resume(void) {
 	int ret = 0;
 	if (resume_slot != -1) {
+		/* Resume from the slot without making it the current one: the
+		 * Auto-Save and GameSwitcher slots must not become the slot the
+		 * SELECT+R2 save shortcut writes to. */
+		int prev = state_slot;
 		state_slot = resume_slot;
 		ret = pa_state_read();
+		state_slot = prev;
 		resume_slot = -1;
 	}
 	return ret;
