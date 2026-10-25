@@ -1965,7 +1965,15 @@ int main(int argc, char **argv) {
 				DBG("DBG retro_run begin pid=%d n=%u core=%s quit=%d\n", getpid(), sf_run_n + 1, core_name, should_quit);
 			++sf_run_n;
 			#endif
-			current_core.retro_run();
+			{
+				extern void lag_note_run(long long us, int rewind_on);
+				struct timespec t0, t1;
+				clock_gettime(CLOCK_MONOTONIC, &t0);
+				current_core.retro_run();
+				clock_gettime(CLOCK_MONOTONIC, &t1);
+				lag_note_run((t1.tv_sec - t0.tv_sec) * 1000000LL + (t1.tv_nsec - t0.tv_nsec) / 1000,
+				             g_rw_buf != NULL);
+			}
 			/* capture every REWIND_INTERVAL frames — per-frame serialize is too
 			 * heavy (chops audio) and drains the ring too fast. */
 			if (g_rw_buf && (++rw_fc % REWIND_INTERVAL) == 0)
