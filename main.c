@@ -666,9 +666,11 @@ void dbg_log(const char *fmt, ...) {
 	va_start(ap, fmt);
 	vfprintf(lf, fmt, ap);
 	va_end(ap);
+	/* fflush only: an fsync on the SD card stalls the game for up to half a
+	 * second, which skewed the very timings these logs measure. The kernel
+	 * writes the file out on its own, and power-off syncs. */
 	fflush(lf);
-	/* Keep diagnostics durable without forcing an SD sync for every frame. */
-	if ((++log_lines & 31u) == 0) fsync(fileno(lf));
+	(void)log_lines;
 }
 
 void core_log_cb(enum retro_log_level level, const char *fmt, ...) {
@@ -683,6 +685,8 @@ void core_log_cb(enum retro_log_level level, const char *fmt, ...) {
     }
 
     if (!enabled || !lf) return;
+    /* Cores' DEBUG output can be a line per DMA (mGBA): thousands a second. */
+    if (level == RETRO_LOG_DEBUG) return;
 
     char buffer[500];
     va_list args;
@@ -701,7 +705,7 @@ void core_log_cb(enum retro_log_level level, const char *fmt, ...) {
     
     fprintf(lf, "[CORE][%s] %s", level_str, buffer);
 	fflush(lf);
-    if ((++log_lines & 31u) == 0) fsync(fileno(lf));
+    (void)log_lines;
 }
 
 static void sig_hex(char *b, int *n, unsigned long v) {

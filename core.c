@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <time.h>
 #include <unistd.h>
 #include "cheat.h"
@@ -63,8 +64,11 @@ void save_relative_path(char *buf, size_t len, const char *basename) {
 	snprintf(buf, len, "%s%s", save_dir, basename);
 }
 
+void sram_wait_background(void);
+
 void sram_write(void) {
 	char filename[MAX_PATH];
+	sram_wait_background();   /* never two writers on one file */
 	FILE *sram_file = NULL;
 	void *sram;
 
@@ -93,6 +97,59 @@ void sram_write(void) {
 	sync();   /* flush FAT metadata too: device is often powered off right after */
 }
 
+/* The periodic flush writes on a thread of its own: fsync and sync on the SD
+ * card take ~0.5 s, which froze the game every 10 s in games whose save RAM
+ * is also work RAM (Yoshi's Island's Super FX). The thread writes a copy, so
+ * the game keeps running. Exit and power-off still use sram_write(). */
+static volatile int sram_bg_busy;
+static char sram_bg_path[MAX_PATH];
+static void *sram_bg_buf;
+static size_t sram_bg_size;
+
+static void *sram_bg_thread(void *arg) {
+	(void)arg;
+	FILE *f = fopen(sram_bg_path, "w");
+	if (f) {
+		if (fwrite(sram_bg_buf, 1, sram_bg_size, f) != sram_bg_size)
+			PA_ERROR("Error writing SRAM data to file\n");
+		fflush(f);
+		fsync(fileno(f));
+		fclose(f);
+		sync();
+	} else {
+		PA_ERROR("Error opening SRAM file: %s\n", strerror(errno));
+	}
+	sram_bg_busy = 0;
+	return NULL;
+}
+
+static void sram_write_background(const void *data, size_t size) {
+	if (sram_bg_size != size) {
+		void *b = realloc(sram_bg_buf, size);
+		if (!b) { sram_write(); return; }
+		sram_bg_buf = b;
+		sram_bg_size = size;
+	}
+	memcpy(sram_bg_buf, data, size);
+	content_based_name(content, sram_bg_path, MAX_PATH, save_dir, NULL, ".sav");
+	sram_bg_busy = 1;
+	pthread_t t;
+	pthread_attr_t a;
+	pthread_attr_init(&a);
+	pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+	if (pthread_create(&t, &a, sram_bg_thread, NULL) != 0) {
+		sram_bg_busy = 0;
+		sram_write();
+	}
+	pthread_attr_destroy(&a);
+}
+
+/* Wait for a background SRAM write before writing or exiting. */
+void sram_wait_background(void) {
+	for (int i = 0; sram_bg_busy && i < 400; i++)
+		usleep(5000);
+}
+
 /* Periodic in-game battery-save flush. picoarch only wrote SRAM on pause-menu
  * open / clean exit, so with the game-switcher flow (power off straight from a
  * game) an in-game save made since the last menu open was lost. Called every
@@ -119,10 +176,11 @@ void sram_autosave(void) {
 		return;
 	}
 	if (!cache || memcmp(cache, sram, sram_size) == 0) return;  /* unchanged */
+	if (sram_bg_busy) return;   /* the last write is still going: next time */
 
 	memcpy(cache, sram, sram_size);
-	sram_write();
-	DBG("DBG sram_autosave: SRAM changed → flushed\n");
+	sram_write_background(cache, sram_size);
+	DBG("DBG sram_autosave: SRAM changed → flushing\n");
 }
 
 void sram_read(void) {
@@ -664,7 +722,7 @@ static void pa_input_poll(void) {
 		key_withhold = 0;
 		static uint32_t prev_raw = 0;   /* for rising-edge combo detection */
 
-		/* Hardware hotkeys: FN tap or SELECT+START = menu, FN hold = GameSwitcher; SELECT+R2 save; SELECT+L2 load; SELECT+R1 fast-forward. */
+		/* Hardware hotkeys: FN tap = menu, FN hold = GameSwitcher; SELECT+R2 save; SELECT+L2 load; SELECT+R1 fast-forward. */
 		const uint32_t SEL_BIT   = (1u << 0);   /* SELECT = bit 0  */
 		const uint32_t START_BIT = (1u << 3);   /* START  = bit 3  */
 		const uint32_t FN_BIT    = (1u << 16);  /* FN     = bit 16 */
@@ -744,8 +802,8 @@ static void pa_input_poll(void) {
 			fn_down_ms = -1;
 		}
 		/* FrogUI's "In-game Menu Keys" setting picks ONE way in:
-		 * 0: FN - tap = menu, hold = GameSwitcher (and SELECT+START = menu,
-		 *    the original default);
+		 * 0: FN - tap = menu, hold = GameSwitcher (SELECT+START goes to the
+		 *    game; it used to open the menu too);
 		 * 1: hold SELECT = menu, hold START = GameSwitcher;
 		 * 2: SELECT+START - tap = menu, hold = GameSwitcher.
 		 * Games use SELECT and START too (Kirby drops its power-up on SELECT),
@@ -857,7 +915,7 @@ static void pa_input_poll(void) {
 				}
 			}
 		}
-		if (menu_armed && ((game_keys == 0 && both) || fn_tap || hold_menu)) {
+		if (menu_armed && (fn_tap || hold_menu)) {
 			menu_armed = 0;
 			menu_off_cnt = 0;
 			handle_emu_action(EACTION_MENU);
