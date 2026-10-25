@@ -16,6 +16,8 @@
 int  menu_font_init(float pixel_height);
 /* 1 once a TTF is loaded, else 0 (callers fall back to the bitmap font). */
 int  menu_font_ready(void);
+/* Use this font file (absolute path) instead, drawn in mixed case. */
+int  menu_font_use_face(const char *path);
 
 /* Draw text at (x,y) = top-left of the glyph cell, in color (RGB565). */
 void menu_font_draw_text(uint16_t *fb, int fb_w, int fb_h,

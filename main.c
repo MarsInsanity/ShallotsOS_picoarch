@@ -963,8 +963,24 @@ static int fb1_toast(const char *text, int msec) {
 	return card != NULL;
 }
 
-/* Clears the toast once it has expired (called every frame). */
+/* A toast asked for while a menu is open is shown once the game is back:
+ * leaving the menu hides the OSD plane again. */
+static char toast_pending[96];
+
+void pa_toast_later(const char *text) {
+	snprintf(toast_pending, sizeof toast_pending, "%s", text ? text : "");
+}
+
+/* Shows a pending toast, and clears one that has expired (every frame). */
 static void fb1_toast_tick(void) {
+	if (toast_pending[0]) {
+		char text[sizeof toast_pending];
+		snprintf(text, sizeof text, "%s", toast_pending);
+		toast_pending[0] = '\0';
+		if (!fb1_toast(text, 2000))
+			plat_video_set_msg(text, 1, 2000);
+		return;
+	}
 	if (!toast_until || toast_now_ms() < toast_until)
 		return;
 	toast_until = 0;

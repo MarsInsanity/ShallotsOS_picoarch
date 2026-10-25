@@ -882,15 +882,16 @@ static menu_entry e_menu_main[] =
  * own stable shell labels and are refreshed after the shared pack is loaded. */
 static void menu_localize(void)
 {
-	e_menu_main[0].name = tr_or("pico.menu.resume", "Resume game");
-	e_menu_main[1].name = tr_or("pico.menu.save_state", "Save state");
-	e_menu_main[2].name = tr_or("pico.menu.load_state", "Load state");
+	/* Miyoo / OnionOS wording for the main menu. */
+	e_menu_main[0].name = tr_or("pico.menu.continue", "Continue");
+	e_menu_main[1].name = tr_or("pico.menu.save", "Save");
+	e_menu_main[2].name = tr_or("pico.menu.load", "Load");
 	e_menu_main[3].name = tr_or("pico.menu.disc_control", "Disc control");
 	e_menu_main[4].name = tr_or("pico.menu.cheats", "Cheats");
 	e_menu_main[5].name = tr_or("pico.menu.options", "Options");
-	e_menu_main[6].name = tr_or("pico.menu.reset_game", "Reset game");
+	e_menu_main[6].name = tr_or("pico.menu.reset", "Reset");
 	e_menu_main[7].name = tr_or("pico.menu.load_new_game", "Load new game");
-	e_menu_main[8].name = tr_or("pico.menu.exit", "Exit");
+	e_menu_main[8].name = tr_or("pico.menu.exit_game", "Exit Game");
 	e_menu_options[0].name = tr_or("pico.options.audio_video", "Audio and video");
 	e_menu_options[1].name = tr_or("pico.options.emulator", "Emulator options");
 	e_menu_options[2].name = tr_or("pico.options.player_controls", "Player controls");
@@ -972,15 +973,6 @@ void menu_end(void)
 
 /* ------------------------- MinUI-style main pause menu ------------------------- */
 
-static void minui_game_title(char *out, size_t n) {
-	const char *p = (content && content->path[0]) ? content->path : "";
-	const char *base = strrchr(p, '/');
-	base = base ? base + 1 : p;
-	snprintf(out, n, "%s", base);
-	char *dot = strrchr(out, '.');
-	if (dot && dot != out) *dot = '\0';
-	if (!out[0]) snprintf(out, n, "picoarch");
-}
 
 static void minui_fill(int x, int y, int w, int h, uint16_t c) {
 	uint16_t *fb = (uint16_t *)g_menuscreen_ptr;
@@ -1014,70 +1006,157 @@ static void minui_thumb(const uint16_t *src, int sw, int sh, int spp,
 	}
 }
 
+/* ---- Main menu, laid out like the Miyoo / OnionOS in-game menu -------------
+ * The paused game fills the screen; a dark panel on the left holds the rows,
+ * the selected one on a full-width bar in the theme's selection colour, and a
+ * hint bar runs along the bottom. Save and Load pick their slot in place with
+ * Left/Right (as on SpruceOS); while one of them is selected, the background
+ * shows that slot's screenshot, or "Empty". */
+#define MAIN_SLOT_ROW(id) ((id) == MA_MAIN_SAVE_STATE || (id) == MA_MAIN_LOAD_STATE)
+
+/* The slot's screenshot, cached until the slot or the files change. */
+static uint16_t *slot_shot;
+static int slot_shot_w, slot_shot_h, slot_shot_for = -2;
+
+static void slot_shot_invalidate(void) { slot_shot_for = -2; }
+
+static int slot_shot_load(int slot) {
+	if (slot_shot_for == slot)
+		return slot_shot != NULL && slot_shot_w > 0;
+	slot_shot_for = slot;
+	slot_shot_w = slot_shot_h = 0;
+	if (!(state_slot_flags & (1 << slot)))
+		return 0;
+	size_t cap = (size_t)g_menuscreen_w * g_menuscreen_h;
+	if (!slot_shot)
+		slot_shot = malloc(cap * 2);
+	if (!slot_shot)
+		return 0;
+	char fn[MAX_PATH];
+	int bpp = 0;
+	state_file_name(fn, sizeof(fn), slot);
+	if (plat_load_screen(fn, slot_shot, cap * 2, &slot_shot_w, &slot_shot_h, &bpp) != 0 || bpp != 2)
+		slot_shot_w = 0;
+	return slot_shot_w > 0;
+}
+
+/* A small filled triangle pointing left (dir < 0) or right. */
+static void minui_arrow(int cx, int cy, int size, int dir, uint16_t c) {
+	for (int i = 0; i < size; i++) {
+		int half = (size - i) * 2 / 3;
+		int x = dir < 0 ? cx - size / 2 + i : cx + size / 2 - i;
+		minui_fill(x, cy - half, 1, half * 2 + 1, c);
+	}
+}
+
+static void minui_text_mid(int x, int cy, const char *t, uint16_t color) {
+	int baseline, cap;
+	menu_font_cap_metrics(&baseline, &cap);
+	menu_font_draw_text((uint16_t *)g_menuscreen_ptr, g_menuscreen_w, g_menuscreen_h,
+	                    x, cy - (baseline - cap / 2), t, color);
+}
+
+/* One footer hint: the button letter on a rounded square, then its label. */
+static int minui_hint(int x, int cy, int size, const char *btn, const char *label,
+                      uint16_t accent) {
+	menu_round_fill(x, cy - size / 2, size, size, size / 4, accent);
+	int bw = menu_font_measure(btn);
+	minui_text_mid(x + (size - bw) / 2, cy, btn, 0xFFFF);
+	x += size + size / 4;
+	minui_text_mid(x, cy, label, 0xFFFF);
+	return x + menu_font_measure(label) + size;
+}
+
 static void minui_draw_main(menu_entry *menu, int sel) {
-	/* Colours come from skin.txt (written by FrogUI from the active theme):
-	 * TEXT = theme select-text, PILL = theme select-bg. */
-	extern int menu_text_color, menu_sel_color, menu_sel_text_color;
-	const uint16_t WHITE = (uint16_t)menu_text_color;                       /* item/title text */
-	const uint16_t PILL  = (menu_sel_color >= 0) ? (uint16_t)menu_sel_color : 0xFFFF; /* selection pill */
-	const uint16_t DARK  = (uint16_t)menu_sel_text_color;                   /* selected text on pill */
+	extern int menu_sel_color, menu_sel_text_color;
+	const uint16_t ACCENT = (menu_sel_color >= 0) ? (uint16_t)menu_sel_color : 0xC104;
+	const uint16_t SEL_TEXT = (uint16_t)menu_sel_text_color;
+	const uint16_t PANEL = 0x18E3, FOOTER = 0x10A2, DIM = 0x8C51;
 	int W = g_menuscreen_w, H = g_menuscreen_h;
-	int pad = W / 20;
-	int rh  = me_mfont_h;                   /* 36 — matches FrogUI ITEM_HEIGHT */
-	int tdy = (rh - MENU_TTF_PX) / 2;       /* vertical text centering in a row */
+	int foot_h = H * 56 / 480, area_h = H - foot_h, panel_w = W / 2;
+	int sel_id = menu[sel].id;
+	int slot_row = MAIN_SLOT_ROW(sel_id) && (menu[sel].enabled);
 
-	menu_draw_begin(1, 0);                  /* darkened game frame as background */
-	menu_font_set_px((float)MENU_TTF_PX);
+	plat_video_menu_begin();
+	minui_fill(0, 0, W, H, 0x0000);
 
-	/* thumbnail box (right) = bright captured frame */
-	int tw = (W * 42) / 100, th = (tw * 3) / 4;
-	int tx = W - tw - pad, ty = pad + rh + rh / 2;
+	/* Background: the paused game, or the selected slot's screenshot, at
+	 * 4:3 like the game on screen. */
+	int bh = area_h, bw = bh * 4 / 3;
+	if (bw > W) { bw = W; bh = bw * 3 / 4; }
+	int bx = (W - bw) / 2, by = (area_h - bh) / 2;
+	if (slot_row) {
+		if (slot_shot_load(state_slot))
+			minui_thumb(slot_shot, slot_shot_w, slot_shot_h, slot_shot_w, bx, by, bw, bh);
+	} else {
+		minui_thumb((const uint16_t *)g_menubg_src_ptr, g_menubg_src_w, g_menubg_src_h,
+		            g_menubg_src_pp, bx, by, bw, bh);
+	}
 
-
-	char title[128];
-	minui_game_title(title, sizeof(title));
-	menu_font_draw_text((uint16_t *)g_menuscreen_ptr, W, H, pad, pad + tdy, title, WHITE);
-	minui_thumb((const uint16_t *)g_menubg_src_ptr, g_menubg_src_w, g_menubg_src_h,
-	            g_menubg_src_pp, tx, ty, tw, th);
-	minui_border(tx - 3, ty - 3, tw + 6, th + 6, 3, WHITE);
-
-	/* item list (left), highlight the selected entry with a rounded white pill */
-	int ly = pad + rh * 2;
-	int barw = tx - (pad - 6) - pad / 2;
+	/* Left panel and rows. */
+	int rows = 0;
+	for (menu_entry *e = menu; e->name; e++)
+		if (e->enabled) rows++;
+	int rh = area_h / (rows > 6 ? rows : 6);
+	float px = rh * 0.42f;
+	if (px < 18) px = 18;
+	if (px > 30) px = 30;
+	menu_font_set_px(px);
+	minui_fill(0, 0, panel_w, area_h, PANEL);
+	int pad = W / 32, y = 0;
 	for (menu_entry *e = menu; e->name; e++) {
 		if (!e->enabled) continue;
-		int idx = (int)(e - menu);
-		if (idx == sel) {
-			menu_round_fill(pad - 6, ly, barw, rh, rh / 4, PILL);
-			menu_font_draw_text((uint16_t *)g_menuscreen_ptr, W, H, pad, ly + tdy, e->name, DARK);
-		} else {
-			menu_font_draw_text((uint16_t *)g_menuscreen_ptr, W, H, pad, ly + tdy, e->name, WHITE);
+		int on = (e - menu) == sel;
+		uint16_t tc = on ? SEL_TEXT : 0xFFFF;
+		if (on)
+			minui_fill(0, y, panel_w, rh, ACCENT);
+		minui_text_mid(pad, y + rh / 2, e->name, tc);
+		if (MAIN_SLOT_ROW(e->id)) {
+			/* "<  1  >" at the right edge of the panel. */
+			char num[8];
+			snprintf(num, sizeof num, "%d", state_slot + 1);
+			int nw = menu_font_measure(num), a = rh / 4;
+			int right = panel_w - pad, cx = right - a - nw / 2 - a;
+			minui_arrow(right - a / 2, y + rh / 2, a, 1, tc);
+			minui_text_mid(cx - nw / 2, y + rh / 2, num, tc);
+			minui_arrow(cx - nw / 2 - a - a / 2, y + rh / 2, a, -1, tc);
 		}
-		ly += rh;
+		y += rh;
 	}
 
-	/* core library name + version (from retro_system_info), under the thumbnail */
-	extern char core_lib_name[64], core_lib_version[32];
-	if (core_lib_name[0]) {
-		char cinfo[96];
-		if (core_lib_version[0])
-			snprintf(cinfo, sizeof(cinfo), "%s %s", core_lib_name, core_lib_version);
-		else
-			snprintf(cinfo, sizeof(cinfo), "%s", core_lib_name);
-		menu_font_draw_text((uint16_t *)g_menuscreen_ptr, W, H, tx, ty + th + 6 + tdy, cinfo, WHITE);
+	if (slot_row && !(state_slot_flags & (1 << state_slot))) {
+		const char *empty = tr_or("pico.menu.slot_empty", "Empty");
+		minui_text_mid(panel_w + (W - panel_w - menu_font_measure(empty)) / 2, area_h / 2, empty, DIM);
 	}
 
-	const char *leg = tr_or("pico.legend.back_ok", "B-BACK   A-OKAY");
-	int lw = menu_font_measure(leg);
-	menu_font_draw_text((uint16_t *)g_menuscreen_ptr, W, H, W - lw - pad, H - rh + tdy, leg, WHITE);
+	/* Hint bar. */
+	minui_fill(0, area_h, W, foot_h, FOOTER);
+	const char *ok = sel_id == MA_MAIN_SAVE_STATE ? tr_or("pico.legend.save", "SAVE")
+	               : sel_id == MA_MAIN_LOAD_STATE ? tr_or("pico.legend.load", "LOAD")
+	               : tr_or("pico.legend.open", "OPEN");
+	int hx = pad, cy = area_h + foot_h / 2, bsz = foot_h * 6 / 10;
+	hx = minui_hint(hx, cy, bsz, "A", ok, ACCENT);
+	hx = minui_hint(hx, cy, bsz, "B", tr_or("pico.legend.back", "BACK"), ACCENT);
+	if (slot_row) {
+		/* Left/Right picks the slot. */
+		int a = bsz / 3;
+		minui_arrow(hx + a / 2, cy, a, -1, 0xFFFF);
+		minui_arrow(hx + a * 2, cy, a, 1, 0xFFFF);
+		minui_text_mid(hx + a * 3 + a / 2, cy, tr_or("pico.legend.slot", "SLOT"), 0xFFFF);
+	}
 
+	menu_font_set_px((float)MENU_TTF_PX);   /* the other menus' size */
 	menu_draw_end();
 }
 
 static int minui_main_loop(menu_entry *menu, int *menu_sel) {
+	extern void pa_toast_later(const char *text);
 	int ret = 0, inp, sel = *menu_sel, smax = me_count(menu) - 1;
 	if (smax < 0) return 0;
 	while ((!menu[sel].enabled || !menu[sel].selectable) && sel < smax) sel++;
+	if (state_slot < 0 || state_slot >= STATE_SLOT_COUNT) state_slot = 0;
+	state_check_slots();
+	slot_shot_invalidate();
 
 	minui_draw_main(menu, sel);
 	while (in_menu_wait_any(NULL, 50) & (PBTN_MOK | PBTN_MBACK | PBTN_MENU))
@@ -1085,7 +1164,8 @@ static int minui_main_loop(menu_entry *menu, int *menu_sel) {
 
 	for (;;) {
 		minui_draw_main(menu, sel);
-		inp = in_menu_wait(PBTN_UP | PBTN_DOWN | PBTN_MOK | PBTN_MBACK | PBTN_MENU, NULL, 70);
+		inp = in_menu_wait(PBTN_UP | PBTN_DOWN | PBTN_LEFT | PBTN_RIGHT | PBTN_MOK |
+		                   PBTN_MBACK | PBTN_MENU, NULL, 70);
 		if (inp & (PBTN_MENU | PBTN_MBACK))
 			break;
 		if (inp & PBTN_UP) {
@@ -1096,7 +1176,33 @@ static int minui_main_loop(menu_entry *menu, int *menu_sel) {
 			do { sel++; if (sel > smax) sel = 0; }
 			while (!menu[sel].enabled || !menu[sel].selectable);
 		}
+		if ((inp & (PBTN_LEFT | PBTN_RIGHT)) && MAIN_SLOT_ROW(menu[sel].id)) {
+			state_slot += (inp & PBTN_RIGHT) ? 1 : STATE_SLOT_COUNT - 1;
+			state_slot %= STATE_SLOT_COUNT;
+		}
 		if (inp & PBTN_MOK) {
+			int id = menu[sel].id;
+			if (MAIN_SLOT_ROW(id)) {
+				/* Save or load the shown slot, then back to the game. */
+				char msg[64];
+				int loading = id == MA_MAIN_LOAD_STATE;
+				if (loading && !(state_slot_flags & (1 << state_slot)))
+					continue;   /* nothing to load */
+				if (emu_save_load_game(loading, 0)) {
+					snprintf(msg, sizeof msg, "%s", loading ? tr_or("pico.toast.load_failed", "Load failed")
+					                                        : tr_or("pico.toast.save_failed", "Save failed"));
+					pa_toast_later(msg);
+					state_check_slots();
+					slot_shot_invalidate();
+					continue;
+				}
+				snprintf(msg, sizeof msg, loading ? tr_or("pico.toast.loaded", "Loaded slot %d")
+				                                  : tr_or("pico.toast.saved", "Saved to slot %d"),
+				         state_slot + 1);
+				pa_toast_later(msg);
+				ret = 1;
+				break;
+			}
 			if (menu[sel].handler) {
 				ret = menu[sel].handler(menu[sel].id, inp);
 				if (ret) break;
@@ -1152,8 +1258,11 @@ int menu_init(void)
 	i18n_init_from_settings();
 	menu_localize();
 
-	/* Load FrogUI's TTF for the menu (no-op + bitmap fallback if unavailable). */
+	/* Load FrogUI's TTF for the menu (no-op + bitmap fallback if unavailable),
+	 * then the OnionOS theme's font when FrogUI passed one in skin.txt. */
 	menu_font_init((float)MENU_TTF_PX);
+	if (menu_skin_font[0] && menu_font_ready())
+		menu_font_use_face(menu_skin_font);
 
 	return 0;
 }

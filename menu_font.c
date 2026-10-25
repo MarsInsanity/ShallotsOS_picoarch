@@ -34,6 +34,10 @@ static int unicode_upper(int cp) {
     switch (cp) { case 0x0105:return 0x0104; case 0x0107:return 0x0106; case 0x0119:return 0x0118; case 0x0142:return 0x0141; case 0x0144:return 0x0143; case 0x015B:return 0x015A; case 0x017A:return 0x0179; case 0x017C:return 0x017B; default:return cp; }
 }
 static int   font_loaded = 0;
+/* Set when a theme font (mixed case) replaces GamePocket, which only has
+ * capitals: text is then drawn as written instead of upper-cased. */
+static int   keep_case = 0;
+#define TEXT_CASE(cp) (keep_case ? (cp) : unicode_upper(cp))
 static float font_px = 20.0f;
 
 static int load_font_into(const char *fname, stbtt_fontinfo *info,
@@ -98,6 +102,8 @@ int menu_font_init(float pixel_height) {
 }
 
 int menu_font_ready(void) { return font_loaded; }
+
+
 int menu_font_height(void) { return (int)font_px; }
 
 /* Persistent glyph cache. draw_char used to run stbtt_GetGlyphBitmapBox +
@@ -170,14 +176,14 @@ static const stbtt_fontinfo *font_for_cp(int cp, float **scale_out) {
 
 static int choose_text_font(const char *text) {
     const char *p = text; int missing = 0;
-    while (*p) { if (!stbtt_FindGlyphIndex(&font_info, unicode_upper(utf8_next(&p)))) missing = 1; }
+    while (*p) { if (!stbtt_FindGlyphIndex(&font_info, TEXT_CASE(utf8_next(&p)))) missing = 1; }
     if (!missing) return 0;
     if (load_unicode_fallback()) {
-        p = text; int all = 1; while (*p) if (!stbtt_FindGlyphIndex(&fallback_info, unicode_upper(utf8_next(&p)))) { all = 0; break; }
+        p = text; int all = 1; while (*p) if (!stbtt_FindGlyphIndex(&fallback_info, TEXT_CASE(utf8_next(&p)))) { all = 0; break; }
         if (all) return 1;
     }
     if (load_latin_fallback()) {
-        p = text; int all = 1; while (*p) if (!stbtt_FindGlyphIndex(&latin_info, unicode_upper(utf8_next(&p)))) { all = 0; break; }
+        p = text; int all = 1; while (*p) if (!stbtt_FindGlyphIndex(&latin_info, TEXT_CASE(utf8_next(&p)))) { all = 0; break; }
         if (all) return 2;
     }
     return 0;
@@ -225,7 +231,7 @@ void menu_font_set_px(float pixel_height) {
 }
 
 static void draw_char(uint16_t *fb, int fb_w, int fb_h, int x, int y, char c, uint16_t color) {
-    if (c >= 'a' && c <= 'z') c = c - 'a' + 'A';
+    if (!keep_case && c >= 'a' && c <= 'z') c = c - 'a' + 'A';
     if (!gcache_baseline) gcache_reset();
     gcache_t *g = gcache_get(c);
     if (!g || g->ready == 2 || g->w == 0) return;   /* oversized / space */
@@ -278,7 +284,7 @@ void menu_font_draw_text(uint16_t *fb, int fb_w, int fb_h,
     active_font_id = choose_text_font(text);
     while (*text) {
         int cp = utf8_next(&text);
-        cp = unicode_upper(cp);
+        cp = TEXT_CASE(cp);
         float *scale_ptr;
         const stbtt_fontinfo *info = font_for_cp(cp, &scale_ptr);
         int gi = stbtt_FindGlyphIndex(info, cp);
@@ -304,7 +310,7 @@ int menu_font_measure(const char *text) {
     active_font_id = choose_text_font(text);
     while (*text) {
         int cp = utf8_next(&text);
-        cp = unicode_upper(cp);
+        cp = TEXT_CASE(cp);
         float *scale_ptr;
         const stbtt_fontinfo *info = font_for_cp(cp, &scale_ptr);
         int gi = stbtt_FindGlyphIndex(info, cp);
@@ -321,4 +327,14 @@ int menu_font_measure(const char *text) {
     }
     active_font_id = 0;
     return width;
+}
+
+int menu_font_use_face(const char *path) {
+    if (!path || !*path || !load_font_file(path)) return 0;
+    keep_case = 1;
+    /* New face: rescale and drop the glyphs cached from the old one. */
+    font_scale = stbtt_ScaleForPixelHeight(&font_info, font_px);
+    gcache_reset();
+    for (char c = GC_FIRST; c <= GC_LAST; c++) gcache_get(c);
+    return 1;
 }

@@ -75,6 +75,7 @@ int g_autostateld_opt;
 static unsigned char *menu_font_data = NULL;
 int menu_text_color = 0xfffe; // default to white
 int menu_sel_color = -1; // disabled
+char menu_skin_font[256] = ""; // skin.txt font=, an OnionOS theme's font file
 int menu_sel_text_color = 0x0000; // selected-row text (default black on pill)
 
 /* note: these might become non-constant in future */
@@ -455,6 +456,14 @@ void menu_init_base(void)
 				if (tmp >= 0) menu_sel_text_color = tmp;
 				else lprintf("skin.txt: parse error for sel_text_color\n");
 			}
+			else if (strncmp(buff, "font=", 5) == 0)
+			{
+				/* An OnionOS theme's font: menu.c switches the TTF to it. */
+				snprintf(menu_skin_font, sizeof(menu_skin_font), "%s", buff + 5);
+				menu_skin_font[strcspn(menu_skin_font, "\r\n")] = '\0';
+			}
+			else if (strncmp(buff, "background_color=", 17) == 0)
+				;   /* written by FrogUI, not used here */
 			else
 				lprintf("skin.txt: parse error: %s\n", buff);
 		}
