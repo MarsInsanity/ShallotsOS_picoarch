@@ -170,6 +170,7 @@ extern int g_switcher_enabled;   /* defined with the GameSwitcher code below */
 int g_game_keys = 0;   /* FrogUI "game_keys": 0 = FN, 1 = hold SELECT/START, 2 = combos */
 static int g_power_resume = 1;   /* FrogUI "Resume After Power-Off" */
 static int g_own_sleep;          /* ShallotsOS sleep on a short press, see own_sleep */
+static long long g_sleep_poweroff_ms = 5 * 60 * 1000;   /* FrogUI "Sleep Power-Off" */
 static void load_frogui_settings(void) {
 	/* filter: FrogUI's choice is only the DEFAULT: if this game has its own
 	 * config (config_override), its in-menu Filter choice wins, so don't
@@ -188,6 +189,10 @@ static void load_frogui_settings(void) {
 	g_power_resume = !frogui_setting_is("power_resume", "off");
 	/* cubevol's sleep is patched out with Disable Sleep on: sleep ourselves. */
 	g_own_sleep = frogui_setting_is("disable_sleep", "on");
+	g_sleep_poweroff_ms = frogui_setting_int("sleep_poweroff", 300);   /* seconds */
+	if (g_sleep_poweroff_ms < 5) g_sleep_poweroff_ms = 5;
+	if (g_sleep_poweroff_ms > 3600) g_sleep_poweroff_ms = 3600;
+	g_sleep_poweroff_ms *= 1000;
 	g_game_keys = frogui_setting_is("game_keys", "hold") ? 1
 	            : frogui_setting_is("game_keys", "combo") ? 2 : 0;
 	DBG("DBG load_frogui_settings: quick_resume=%d autosave_autoload=%d stock_battery=%d\n",
@@ -907,10 +912,9 @@ static void sleep_watch(void) {
  * short presses, so ShallotsOS sleeps itself, like OnionOS: a short press
  * pauses the game, mutes audio, turns the backlight off and lets the CPU slow
  * down; the next short press wakes it and puts back exactly what it changed.
- * After SLEEP_POWEROFF_MS asleep it powers off (saving the game for Resume
- * After Power-Off first), which also stops the LEDs. Holding power while
- * asleep powers off as usual, saving the game first. */
-#define SLEEP_POWEROFF_MS (5 * 60 * 1000)
+ * After FrogUI's "Sleep Power-Off" time asleep (10 s to 30 min) it powers
+ * off, saving the game for Resume After Power-Off first, which also stops
+ * the LEDs. Holding power while asleep powers off as usual, saving first. */
 
 static void cpu_power_save(void) {
 	for (int i = 0; i < 4; i++) {
@@ -980,7 +984,7 @@ static void own_sleep(const char *rom) {
 		} else if (down_at >= 0) {
 			break;   /* a short press: wake up */
 		}
-		if (now - start >= SLEEP_POWEROFF_MS) {
+		if (now - start >= g_sleep_poweroff_ms) {
 			DBG("DBG sleep: asleep too long, powering off\n");
 			if (can_save) {
 				power_suspend(rom);
