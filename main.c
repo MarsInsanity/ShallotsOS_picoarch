@@ -163,6 +163,7 @@ static void apply_brightness(int level) {
 	close(fd);
 	DBG("DBG apply_brightness: level=%d -> %d\n", level, out);
 }
+extern int g_switcher_enabled;   /* defined with the GameSwitcher code below */
 static void load_frogui_settings(void) {
 	/* filter: FrogUI's choice is only the DEFAULT: if this game has its own
 	 * config (config_override), its in-menu Filter choice wins, so don't

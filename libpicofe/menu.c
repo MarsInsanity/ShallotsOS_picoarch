@@ -306,18 +306,20 @@ static void menu_draw_selection(int x, int y, int w)
 	int i, h;
 	unsigned short *dst, *dest;
 
-	/* TTF look: white rounded pill (FrogUI select_bg). Selected text is drawn
-	 * black by me_draw. The passed width `w` is computed from the bitmap font
+	/* TTF look: rounded pill in the theme's selection colour (FrogUI
+	 * select_bg, as the main menu uses), white without a skin. Selected text
+	 * uses menu_sel_text_color. The passed width `w` is computed from the bitmap font
 	 * (8px/char) and is too narrow for proportional TTF glyphs — long entries
 	 * would overflow the pill and render black-on-dark (invisible). Extend the
-	 * pill to the screen edge so any entry stays on the white. */
+	 * pill to the screen edge so any entry stays on it. */
 	if (menu_font_ready()) {
 		int pw = g_menuscreen_w - x - 4;
 		if (pw < w) pw = w;
 		/* Stay within this row's own [y, y+me_mfont_h) band - a y-2 start
 		 * with the same height bled 2px into the row above, wiping thin
 		 * glyph strokes (e.g. "I") there when this row became selected. */
-		menu_round_fill(x, y, pw, me_mfont_h, me_mfont_h / 4, 0xFFFF);
+		menu_round_fill(x, y, pw, me_mfont_h, me_mfont_h / 4,
+		                menu_sel_color >= 0 ? menu_sel_color : 0xFFFF);
 		return;
 	}
 
@@ -1440,7 +1442,10 @@ static void draw_savestate_bg(int slot);
 /* MinUI-style: slot list on the left, selected slot's screenshot on the right. */
 static void draw_savestate_menu(int menu_sel, int is_loading)
 {
-	const uint16_t WHITE = 0xFFFF, DARK = 0x0000;
+	/* Same skin colours as the main menu's minui_draw_main. */
+	const uint16_t WHITE = (uint16_t)menu_text_color;
+	const uint16_t PILL = menu_sel_color >= 0 ? (uint16_t)menu_sel_color : 0xFFFF;
+	const uint16_t DARK = (uint16_t)menu_sel_text_color;
 	int W = g_menuscreen_w, H = g_menuscreen_h;
 	int i, x, y, w, h;
 	char buf[48];
@@ -1513,7 +1518,7 @@ static void draw_savestate_menu(int menu_sel, int is_loading)
 			if (state_slot_times[i]) { time_t t = state_slot_times[i]; strftime(tb, sizeof(tb), "%x %R", localtime(&t)); }
 			snprintf(buf, sizeof(buf), "Slot %d  -  %s", i + 1, tb);
 		}
-		if (i == menu_sel) menu_round_fill(pad - 6, y, barw, rh, rh / 4, WHITE);
+		if (i == menu_sel) menu_round_fill(pad - 6, y, barw, rh, rh / 4, PILL);
 		menu_font_draw_text((uint16_t *)g_menuscreen_ptr, W, H, pad, y + tdy, buf,
 		                    (i == menu_sel) ? DARK : WHITE);
 	}
