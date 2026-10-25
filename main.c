@@ -344,14 +344,18 @@ static void power_watch(const char *rom) {
 	long long now = (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 	if (!(power_gpio[POWER_GPIO_IN] & POWER_GPIO_BIT)) {
 		released_at = -1;
-		if (down_since < 0)
+		if (down_since < 0) {
 			down_since = now;
+			DBG("DBG power: button down\n");
+		}
 		else if (!power_saved && now - down_since >= POWER_SAVE_MS) {
 			power_suspend(rom);
 			power_saved = 1;
 		}
 		return;
 	}
+	if (down_since >= 0)
+		DBG("DBG power: button up after %lld ms\n", now - down_since);
 	down_since = -1;
 	if (!power_saved)
 		return;
@@ -785,6 +789,11 @@ static void sleep_watch(void) {
 	long long mono = (long long)m.tv_sec * 1000 + m.tv_nsec / 1000000;
 	long long gap = (long long)b.tv_sec * 1000 + b.tv_nsec / 1000000 - mono;
 	int woke = last_mono >= 0 && (mono - last_mono > 3000 || gap - last_gap > 1000);
+	if (woke)
+		/* Tells the kinds of sleep apart in the log: a suspended kernel
+		 * grows the BOOTTIME gap, a paused process only the frame gap. */
+		DBG("DBG sleep: frame gap %lld ms, suspended %lld ms\n",
+		    mono - last_mono, gap - last_gap);
 	last_mono = mono;
 	last_gap = gap;
 	if (!woke && (frames % 300) == 0 && !cpu_at_full_speed())
