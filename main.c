@@ -13,6 +13,7 @@
 #include <time.h>
 #include <dirent.h>
 #include <strings.h>
+#include <ctype.h>
 #include <sys/mman.h>
 #include <malloc.h>
 #include <dlfcn.h>
@@ -421,6 +422,80 @@ static void low_battery_watch(const char *rom) {
 	}
 }
 
+/* One-off hardware report in logs/picoarch.log (only when log.txt exists),
+ * written on the first launcher start of a boot: how the front LEDs and other
+ * outputs are exposed, to find a way to switch the LEDs off during sleep. */
+static void dump_tree(const char *dir, int depth) {
+	DIR *d = opendir(dir);
+	if (!d)
+		return;
+	struct dirent *e;
+	while ((e = readdir(d)) != NULL) {
+		if (e->d_name[0] == '.')
+			continue;
+		char path[512];
+		snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+		char lower[256];
+		size_t i;
+		for (i = 0; e->d_name[i] && i < sizeof lower - 1; i++)
+			lower[i] = (char)tolower((unsigned char)e->d_name[i]);
+		lower[i] = '\0';
+		if (strstr(lower, "led") || strstr(lower, "rgb") || strstr(lower, "light") ||
+		    strstr(lower, "pwm") || strstr(lower, "gpio"))
+			DBG("DBG hw: %s\n", path);
+		struct stat st;
+		if (depth > 0 && stat(path, &st) == 0 && S_ISDIR(st.st_mode))
+			dump_tree(path, depth - 1);
+	}
+	closedir(d);
+}
+
+static void dump_file(const char *path) {
+	char buf[160] = "";
+	FILE *f = fopen(path, "r");
+	if (!f)
+		return;
+	if (fgets(buf, sizeof buf, f))
+		buf[strcspn(buf, "\n")] = '\0';
+	fclose(f);
+	DBG("DBG hw: %s = %s\n", path, buf);
+}
+
+static void hardware_report(void) {
+	if (access("/mnt/sdcard/log.txt", F_OK) != 0)
+		return;
+	DBG("DBG hw: --- hardware report ---\n");
+	DIR *d = opendir("/sys/class/leds");
+	struct dirent *e;
+	while (d && (e = readdir(d)) != NULL) {
+		if (e->d_name[0] == '.')
+			continue;
+		char path[256];
+		static const char *const attrs[] = {"brightness", "max_brightness", "trigger"};
+		for (int i = 0; i < 3; i++) {
+			snprintf(path, sizeof path, "/sys/class/leds/%s/%s", e->d_name, attrs[i]);
+			dump_file(path);
+		}
+	}
+	if (d)
+		closedir(d);
+	dump_tree("/sys/class", 1);
+	dump_tree("/dev", 0);
+	dump_tree("/proc/device-tree", 2);
+	int fd = open("/dev/mem", O_RDONLY | O_SYNC);
+	if (fd >= 0) {
+		void *p = mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, POWER_GPIO_BASE);
+		if (p != MAP_FAILED) {
+			volatile uint32_t *r = p;
+			for (int off = 0x44; off <= 0x5c; off += 4)
+				DBG("DBG hw: gpio+0x%02x = %08x\n", off, r[off / 4]);
+			munmap(p, 4096);
+		}
+		close(fd);
+	}
+	DBG("DBG hw: --- end ---\n");
+}
+
 /* After a power-off in a game, the first launcher start of the next boot
  * resumes it. The marker is removed first, so a game that fails to start
  * can't loop. */
@@ -432,6 +507,7 @@ static void power_resume_redirect(void) {
 	FILE *bf = fopen("/tmp/shallotsos_booted", "w");
 	if (bf)
 		fclose(bf);
+	hardware_report();
 	if (!read_game_file(POWER_RESUME_FILE, core, sizeof core, rom, sizeof rom))
 		return;
 	unlink(POWER_RESUME_FILE);
