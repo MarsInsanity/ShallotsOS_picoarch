@@ -861,6 +861,19 @@ void plat_video_menu_enter(int is_rom_loaded)
 	g_menuscreen_ptr = fb_flip();
 }
 
+#ifdef PLATFORM_SF3000
+/* Capture the live frame for the per-game screenshot and save-state thumbnail
+ * without switching to the menu screen, so the game stays on screen. */
+void plat_video_capture(void)
+{
+	if (menu_buffers_init()) return;
+	SDL_LockSurface(screen);
+	sf3000_capture_menubg();
+	save_game_screenshot();
+	SDL_UnlockSurface(screen);
+}
+#endif
+
 void plat_video_menu_begin(void)
 {
 	SDL_LockSurface(screen);

@@ -256,17 +256,19 @@ static void switcher_suspend(void) {
 /* ---- Save on power-off -----------------------------------------------------
  * The power button is pin 14 of the GPIO bank at 0x18800000: cubegm/powergpio
  * powers off by driving it low (ALi/HiChip layout: +0x50 input, +0x54 output,
- * +0x58 direction, 1 = output). A long press cuts power in hardware, about 4 s
- * in, without telling software. So watch the pin: once it has been held for a
- * second in a game, suspend to the GameSwitcher slot and leave a marker so the
- * next boot resumes the game. Letting go while the console is still on means
- * it wasn't a power-off: the save is dropped and play continues. A short press
- * (sleep) never gets that far. */
+ * +0x58 direction, 1 = output). Holding it starts the firmware's power-off
+ * screen and shutdown, which can take a few seconds. So watch the pin: once
+ * it has been held for a second in a game, suspend to the GameSwitcher slot
+ * and leave a marker so the next boot resumes the game. The button is usually
+ * let go during the shutdown, so the save is only dropped if the game is still
+ * running well after that. A short press (sleep) never gets that far. If the
+ * shutdown asks picoarch to quit (SIGTERM) first, it saves then. */
 #define POWER_GPIO_BASE   0x18800000u
 #define POWER_GPIO_IN     (0x50 / 4)
 #define POWER_GPIO_DIR    (0x58 / 4)
 #define POWER_GPIO_BIT    (1u << 14)
 #define POWER_SAVE_MS     1000
+#define POWER_CANCEL_MS   10000
 #define POWER_RESUME_FILE "/mnt/sdcard/picoarch/resume_on_boot.txt"
 static volatile uint32_t *power_gpio;
 
@@ -291,13 +293,21 @@ static void power_watch_init(void) {
 	power_gpio = r;
 }
 
+static volatile sig_atomic_t power_term;
+static int power_saved;
+
+static void power_term_handler(int sig) {
+	(void)sig;
+	power_term = 1;
+}
+
 static void power_suspend(const char *rom) {
-	plat_video_menu_enter(1);   /* refresh the GameSwitcher screenshot */
+	extern void plat_video_capture(void);
+	plat_video_capture();   /* refresh the GameSwitcher screenshot */
 	int prev = state_slot;
 	state_slot = SWITCHER_SLOT;
 	g_suspended = state_allowed() && pa_state_write() == 0;
 	state_slot = prev;
-	plat_video_menu_leave();
 	sram_write();
 	if (g_suspended) {
 		FILE *f = fopen(POWER_RESUME_FILE, "w");
@@ -313,38 +323,58 @@ static void power_suspend(const char *rom) {
 }
 
 static void power_watch(const char *rom) {
-	static long long down_since = -1;
-	static int saved = 0;
+	static long long down_since = -1, released_at = -1;
+	if (power_term) {
+		/* The shutdown asked us to quit: save if not done yet, then leave. */
+		if (!power_saved)
+			power_suspend(rom);
+		power_saved = 1;
+		should_quit = 1;
+		return;
+	}
 	if (!power_gpio)
 		return;
 	struct timespec t;
 	clock_gettime(CLOCK_MONOTONIC, &t);
 	long long now = (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 	if (!(power_gpio[POWER_GPIO_IN] & POWER_GPIO_BIT)) {
+		released_at = -1;
 		if (down_since < 0)
 			down_since = now;
-		else if (!saved && now - down_since >= POWER_SAVE_MS) {
+		else if (!power_saved && now - down_since >= POWER_SAVE_MS) {
 			power_suspend(rom);
-			saved = 1;
+			power_saved = 1;
 		}
 		return;
 	}
-	if (saved) {
-		/* Still running after the button was let go: not a power-off. */
+	down_since = -1;
+	if (!power_saved)
+		return;
+	if (released_at < 0) {
+		released_at = now;
+	} else if (now - released_at >= POWER_CANCEL_MS) {
+		/* Still running long after the button was let go: not a power-off. */
 		switcher_discard();
 		unlink(POWER_RESUME_FILE);
 		sync();
 		g_suspended = 0;
-		saved = 0;
-		DBG("DBG power: released, suspend state dropped\n");
+		power_saved = 0;
+		released_at = -1;
+		DBG("DBG power: no power-off, suspend state dropped\n");
 	}
-	down_since = -1;
 }
 
-/* After a power-off in a game, the first launcher start resumes it. The
- * marker is removed first, so a game that fails to start can't loop. */
+/* After a power-off in a game, the first launcher start of the next boot
+ * resumes it. The marker is removed first, so a game that fails to start
+ * can't loop. */
 static void power_resume_redirect(void) {
 	char core[512], rom[512];
+	/* Only the first launcher start of a boot (/tmp is empty after boot). */
+	if (access("/tmp/shallotsos_booted", F_OK) == 0)
+		return;
+	FILE *bf = fopen("/tmp/shallotsos_booted", "w");
+	if (bf)
+		fclose(bf);
 	if (!read_game_file(POWER_RESUME_FILE, core, sizeof core, rom, sizeof rom))
 		return;
 	unlink(POWER_RESUME_FILE);
@@ -1346,6 +1376,7 @@ int main(int argc, char **argv) {
 			DBG("DBG switcher: resuming suspend state\n");
 		}
 		power_watch_init();
+		signal(SIGTERM, power_term_handler);
 	}
 #endif
 	/* Restore a few frames in rather than right after loading: some cores
@@ -1447,6 +1478,12 @@ int quit(int code) {
 		state_slot = prev;
 		sync();
 		DBG("DBG quit: autosave_autoload final save to slot 99\n");
+	}
+	/* Leaving the game normally soon after a power-button save: it was not a
+	 * power-off, so drop that save (a shutdown's SIGTERM keeps it). */
+	if (!g_is_frogui && power_saved && !power_term) {
+		unlink(POWER_RESUME_FILE);
+		g_suspended = 0;
 	}
 	/* Leaving without holding FN: the game should start normally next time. */
 	if (!g_is_frogui && !g_suspended && content && current_core.retro_unload_game)
