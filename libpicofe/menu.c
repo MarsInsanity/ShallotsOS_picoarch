@@ -598,6 +598,12 @@ static int menu_battery_pct(int *charging)
 	return cached;
 }
 
+/* Battery level (0-100, -1 unknown) for the low-battery save in main.c. */
+int menu_battery_level(int *charging)
+{
+	return menu_battery_pct(charging);
+}
+
 /* "Battery Colour Mode" from frogui/settings.txt (cached): solid colour light.
  * Read through the ONE shared parser (frogui_settings.h) - no third copy of
  * the settings-file parsing here. */

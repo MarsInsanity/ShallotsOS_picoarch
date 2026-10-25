@@ -167,6 +167,7 @@ static void apply_brightness(int level) {
 }
 extern int g_switcher_enabled;   /* defined with the GameSwitcher code below */
 int g_game_keys = 0;   /* FrogUI "game_keys": 0 = FN, 1 = hold SELECT/START, 2 = combos */
+static int g_power_resume = 1;   /* FrogUI "Resume After Power-Off" */
 static void load_frogui_settings(void) {
 	/* filter: FrogUI's choice is only the DEFAULT: if this game has its own
 	 * config (config_override), its in-menu Filter choice wins, so don't
@@ -182,6 +183,7 @@ static void load_frogui_settings(void) {
 	g_stock_battery    = !frogui_setting_is("stock_battery", "off");
 	g_brightness       = frogui_setting_int("brightness", -1);   /* applied on game path only */
 	g_switcher_enabled = !frogui_setting_is("game_switcher", "off");
+	g_power_resume = !frogui_setting_is("power_resume", "off");
 	g_game_keys = frogui_setting_is("game_keys", "hold") ? 1
 	            : frogui_setting_is("game_keys", "combo") ? 2 : 0;
 	DBG("DBG load_frogui_settings: quick_resume=%d autosave_autoload=%d stock_battery=%d\n",
@@ -367,6 +369,54 @@ static void power_watch(const char *rom) {
 	}
 }
 
+/* Low battery: once the level has stayed at LOW_BATTERY_PCT or below for
+ * LOW_BATTERY_MS without charging (load makes the reading dip), save like a
+ * power-off. A console with a momentary power button then powers off the way
+ * the Shutdown app does (cubegm/shutdown.sh); one with a power switch
+ * (SF3000) can't, so it keeps the save fresh every LOW_BATTERY_RESAVE_MS
+ * until the battery dies or the game is left. */
+#define LOW_BATTERY_PCT       5
+#define LOW_BATTERY_MS        30000
+#define LOW_BATTERY_RESAVE_MS 120000
+#define SHUTDOWN_SCRIPT       "/mnt/sdcard/cubegm/shutdown.sh"
+
+static void low_battery_watch(const char *rom) {
+	extern int menu_battery_level(int *charging);
+	static long long low_since = -1, last_save = -1;
+	static int shutting_down = 0;
+	if (shutting_down)
+		return;
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	long long now = (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+	int charging = 0, pct = menu_battery_level(&charging);   /* cached ~5 s */
+	if (pct < 0 || charging || pct > LOW_BATTERY_PCT) {
+		low_since = -1;
+		return;
+	}
+	if (low_since < 0)
+		low_since = now;
+	if (now - low_since < LOW_BATTERY_MS)
+		return;
+	if (power_gpio && access(SHUTDOWN_SCRIPT, X_OK) == 0) {
+		plat_video_set_msg("Battery low: saving and shutting down", 1, 5000);
+		power_suspend(rom);
+		power_saved = 1;
+		shutting_down = 1;
+		DBG("DBG power: battery %d%%, saved, shutting down\n", pct);
+		if (fork() == 0) {
+			execl("/bin/sh", "sh", SHUTDOWN_SCRIPT, (char *)NULL);
+			_exit(1);
+		}
+	} else if (last_save < 0 || now - last_save >= LOW_BATTERY_RESAVE_MS) {
+		power_suspend(rom);
+		power_saved = 1;
+		last_save = now;
+		plat_video_set_msg("Battery low: game saved", 1, 3000);
+		DBG("DBG power: battery %d%%, game saved\n", pct);
+	}
+}
+
 /* After a power-off in a game, the first launcher start of the next boot
  * resumes it. The marker is removed first, so a game that fails to start
  * can't loop. */
@@ -382,6 +432,8 @@ static void power_resume_redirect(void) {
 		return;
 	unlink(POWER_RESUME_FILE);
 	sync();
+	if (!g_power_resume)
+		return;   /* turned off since: the game starts normally next time */
 	if (access(core, F_OK) != 0 || access(rom, F_OK) != 0)
 		return;
 	DBG("DBG power: resuming %s after power-off\n", rom);
@@ -1378,8 +1430,10 @@ int main(int argc, char **argv) {
 			g_resume_suspend = 1;
 			DBG("DBG switcher: resuming suspend state\n");
 		}
-		power_watch_init();
-		signal(SIGTERM, power_term_handler);
+		if (g_power_resume) {
+			power_watch_init();
+			signal(SIGTERM, power_term_handler);
+		}
 	}
 #endif
 	/* Restore a few frames in rather than right after loading: some cores
@@ -1431,8 +1485,10 @@ int main(int argc, char **argv) {
 			g_switcher_requested = 0;
 			switcher_suspend();
 		}
-		if (!g_is_frogui && !should_quit)
+		if (!g_is_frogui && !should_quit && g_power_resume) {
 			power_watch(content_path);
+			low_battery_watch(content_path);
+		}
 #endif
 		if (!should_quit)
 			plat_video_flip();
