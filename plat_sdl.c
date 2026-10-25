@@ -841,8 +841,12 @@ static void sf3000_capture_menubg(void)
 }
 #endif
 
+/* The FPS / CPU readout and other HUD text stay off the in-game menu. */
+static int g_menu_open;
+
 void plat_video_menu_enter(int is_rom_loaded)
 {
+	g_menu_open = 1;
 	if (menu_buffers_init()) PA_FATAL("Couldn't allocate menu buffers\n");
 	memory_profile("menu_enter");
 	SDL_LockSurface(screen);
@@ -889,6 +893,7 @@ void plat_video_menu_end(void)
 
 void plat_video_menu_leave(void)
 {
+	g_menu_open = 0;
 	memset(g_menubg_src_ptr, 0, g_menuscreen_h * g_menuscreen_pp * sizeof(uint16_t));
 
 	SDL_LockSurface(screen);
@@ -1040,7 +1045,7 @@ void plat_video_process(const void *data, unsigned width, unsigned height, size_
 		buffer_scale(width, height, pitch, data);
 	}
 
-	if (msg[0]) {
+	if (msg[0] && !g_menu_open) {
 		video_print_msg(screen->pixels, screen->h, screen->pitch / (SCREEN_BPP / 8), msg);
 		had_msg = 1;
 	}
@@ -2954,7 +2959,7 @@ if (sf3000_use_hwdisp) {
 
         /* FPS / overlay text: render into a copy of src (RGB565), since src
          * itself is owned by the core and may be read-only. */
-        if (msg[0]) {
+        if (msg[0] && !g_menu_open) {
             static uint16_t *compose_buf = NULL;
             static int compose_cap = 0;
             int need = width * height;
@@ -3217,7 +3222,7 @@ if (sf3000_use_hwdisp) {
         fb_y += count;
     }
 
-    if (msg[0]) {
+    if (msg[0] && !g_menu_open) {
         /* Draw overlay text (FPS, CPU load, etc.) 
            px=10, py=10 is top-left in landscape */
         sf3000_text_native(10, 10, msg, 0xFFFFFFFFu, page_y_offset);

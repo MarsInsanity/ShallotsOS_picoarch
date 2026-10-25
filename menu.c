@@ -1486,9 +1486,7 @@ static int minui_main_loop(menu_entry *menu, int *menu_sel) {
 				if (save_pos < SLOT_POS_FIRST_USER) save_pos = SLOT_POSITIONS - 1;
 				if (save_pos >= SLOT_POSITIONS) save_pos = SLOT_POS_FIRST_USER;
 			} else {
-				/* Load: Auto and Switcher only while they hold a state. */
-				do load_pos = (load_pos + step + SLOT_POSITIONS) % SLOT_POSITIONS;
-				while (load_pos < SLOT_POS_FIRST_USER && !slot_used[load_pos]);
+				load_pos = (load_pos + step + SLOT_POSITIONS) % SLOT_POSITIONS;
 			}
 		}
 		if (inp & PBTN_MOK) {

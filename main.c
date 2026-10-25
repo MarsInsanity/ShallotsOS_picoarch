@@ -1450,18 +1450,9 @@ void handle_emu_action(emu_action action)
 		toggle_fast_forward(1); /* Force FF off */
 		sram_write();
 		DBG("DBG EACTION_MENU: sram_write done\n");
-#ifdef PLATFORM_SF3000
-		/* Auto-save snapshot on menu open — only safe point to save
-		 * mid-game (game is paused while menu is up). */
-		if (g_autosave_autoload && !g_is_frogui) {
-			int prev = state_slot;
-			state_slot = 9;  /* reserved auto-save/auto-load slot (10th) */
-			pa_state_write();
-			state_slot = prev;
-			sync();
-			DBG("DBG autosave_autoload: state saved to slot 99 (menu open)\n");
-		}
-#endif
+		/* No auto-save here: the Auto slot keeps the state from when the
+		 * game was last left, so Load > Auto can go back to it. Power-off
+		 * and low battery save to the Switcher slot instead. */
 	}
 #ifdef MMENU
 		if (mmenu && content && content->path) {
