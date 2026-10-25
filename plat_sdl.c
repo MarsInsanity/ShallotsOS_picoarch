@@ -859,6 +859,61 @@ static void sf3000_capture_menubg(void)
 /* The FPS / CPU readout and other HUD text stay off the in-game menu. */
 static int g_menu_open;
 
+#ifdef PLATFORM_SF3000
+/* ---- Lag report ---------------------------------------------------------------
+ * Every 5 s of play, one log line with what decides input latency: the frame
+ * interval and present time, the queued audio, events waiting in the SDL
+ * queue and the CPU clock. Comparing lines before a lag spell and after it
+ * clears (opening the menu fixes it) shows which one changed. */
+static unsigned lag_aring_queued(void);
+static long long lag_us(void) {
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (long long)t.tv_sec * 1000000 + t.tv_nsec / 1000;
+}
+
+static void lag_read(const char *path, char *out, size_t n) {
+	FILE *f = fopen(path, "r");
+	out[0] = '\0';
+	if (f) {
+		if (fgets(out, (int)n, f)) out[strcspn(out, "\n")] = '\0';
+		fclose(f);
+	}
+}
+
+static void lag_frame(long long present_us) {
+	static long long window_start, last, int_max, pres_sum, pres_max;
+	static unsigned frames;
+	long long now = lag_us();
+	if (g_menu_open) return;
+	if (last && now - last > 1000000) window_start = 0;   /* a pause: new window */
+	if (!window_start) {
+		window_start = last = now;
+		frames = 0; int_max = pres_sum = pres_max = 0;
+		return;
+	}
+	if (now - last > int_max) int_max = now - last;
+	last = now;
+	frames++;
+	pres_sum += present_us;
+	if (present_us > pres_max) pres_max = present_us;
+	if (now - window_start < 5000000 || !frames) return;
+	char gov[24], cur[24], max[24];
+	lag_read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", gov, sizeof gov);
+	lag_read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", cur, sizeof cur);
+	lag_read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq", max, sizeof max);
+	int sdlq = SDL_PeepEvents(NULL, 0, SDL_PEEKEVENT, SDL_ALLEVENTS);
+	dbg_log("DBG lag: fps=%.1f frame max=%lldms present avg/max=%lld/%lldms audio=%u sdlq=%d cpu=%s %s/%s\n",
+	        frames * 1000000.0 / (now - window_start), int_max / 1000,
+	        pres_sum / frames / 1000, pres_max / 1000, lag_aring_queued(), sdlq, gov, cur, max);
+	window_start = now;
+	frames = 0; int_max = pres_sum = pres_max = 0;
+}
+#endif
+#ifdef PLATFORM_SF3000
+static void capture_keep(void);
+#endif
+
 void plat_video_menu_enter(int is_rom_loaded)
 {
 	g_menu_open = 1;
@@ -872,6 +927,7 @@ void plat_video_menu_enter(int is_rom_loaded)
 	 * is exactly what plat_dump_screen reads. */
 	if (is_rom_loaded)
 		save_game_screenshot();
+	capture_keep();
 	memset(screen->pixels, 0, screen->h * screen->pitch);
 #else
 	memcpy(g_menubg_src_ptr, screen->pixels, g_menubg_src_h * g_menubg_src_pp * sizeof(uint16_t));
@@ -881,6 +937,25 @@ void plat_video_menu_enter(int is_rom_loaded)
 }
 
 #ifdef PLATFORM_SF3000
+/* A copy of the last good capture (taken when the menu opened, or by the
+ * GameSwitcher's suspend), for a capture that comes out black. */
+static uint16_t *g_capture_copy;
+
+static int capture_has_picture(void) {
+	const uint16_t *p = g_menubg_src_ptr;
+	size_t n = (size_t)g_menubg_src_h * g_menubg_src_pp;
+	for (size_t i = 0; p && i < n; i += 7)
+		if (p[i]) return 1;
+	return 0;
+}
+
+static void capture_keep(void) {
+	size_t n = (size_t)g_menubg_src_h * g_menubg_src_pp;
+	if (!g_menubg_src_ptr || !capture_has_picture()) return;
+	if (!g_capture_copy) g_capture_copy = malloc(n * sizeof *g_capture_copy);
+	if (g_capture_copy) memcpy(g_capture_copy, g_menubg_src_ptr, n * sizeof *g_capture_copy);
+}
+
 /* Capture the live frame for the per-game screenshot and save-state thumbnail
  * without switching to the menu screen, so the game stays on screen. */
 void plat_video_capture(void)
@@ -888,6 +963,12 @@ void plat_video_capture(void)
 	if (menu_buffers_init()) return;
 	SDL_LockSurface(screen);
 	sf3000_capture_menubg();
+	int ok = capture_has_picture();
+	if (!ok && g_capture_copy)
+		memcpy(g_menubg_src_ptr, g_capture_copy,
+		       (size_t)g_menubg_src_h * g_menubg_src_pp * sizeof(uint16_t));
+	dbg_log("DBG capture: frame=%p %dx%d picture=%d copy=%d\n", (const void *)g_last565,
+	        g_last565_w, g_last565_h, ok, !ok && g_capture_copy);
 	save_game_screenshot();
 	SDL_UnlockSurface(screen);
 }
@@ -1012,7 +1093,9 @@ void plat_video_process(const void *data, unsigned width, unsigned height, size_
 		g_last565_h = (int)height; g_last565_pitch = (int)pitch;
 		SDL_UnlockSurface(screen);
 		video_update_msg();
+		long long lag_t0 = lag_us();
 		sf3000_fb_blit(data, (int)width, (int)height, (int)pitch);
+		lag_frame(lag_us() - lag_t0);
 		return;
 	}
 
@@ -1052,7 +1135,11 @@ void plat_video_process(const void *data, unsigned width, unsigned height, size_
 		SDL_UnlockSurface(screen);
 		video_update_msg();
 		if (conv_buf)
+		{
+			long long lag_t0 = lag_us();
 			sf3000_fb_blit(conv_buf, (int)width, (int)height, (int)width * 2);
+			lag_frame(lag_us() - lag_t0);
+		}
 		return;
 	}
 #endif
@@ -1323,6 +1410,7 @@ static unsigned           sf3000_underruns = 0;
 static unsigned           sf3000_overruns = 0;
 static pthread_mutex_t    sf3000_aring_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t          sf3000_audio_thread;
+static unsigned lag_aring_queued(void) { return sf3000_aring_w - sf3000_aring_r; }
 static volatile int       sf3000_audio_running = 0;
 static volatile int       sf3000_audio_menu_paused = 0;
 static volatile int       sf3000_audio_resume_immediate = 0;
