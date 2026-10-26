@@ -14,6 +14,7 @@
 #include "overrides/smsplus.h"
 #include "overrides/snes9x2002.h"
 #include "overrides/snes9x2005.h"
+#include "overrides/hcsnes.h"
 #include "overrides/snes9x2005_plus.h"
 #include "overrides/vitaquake2.h"
 #include "util.h"
@@ -35,6 +36,8 @@ static const struct core_override overrides[] = {
 	snes9x2002_overrides,
 	snes9x2005_overrides,
 	snes9x2005_plus_overrides,
+	hcsnes_overrides("hcsnes_fast"),
+	hcsnes_overrides("hcsnes_plus"),
 	vitaquake2_overrides,
 };
 
