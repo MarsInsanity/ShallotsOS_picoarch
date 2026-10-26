@@ -872,13 +872,6 @@ static long long lag_us(void) {
 	return (long long)t.tv_sec * 1000000 + t.tv_nsec / 1000;
 }
 
-static void lag_read(const char *path, char *out, size_t n) {
-	FILE *f = fopen(path, "r");
-	out[0] = '\0';
-	if (f) {
-		if (fgets(out, (int)n, f)) out[strcspn(out, "\n")] = '\0';
-		fclose(f);
-	}
 }
 
 /* Time in retro_run (emulation plus the present inside it), from main.c. */
@@ -890,6 +883,53 @@ void lag_note_run(long long us, int rewind_on) {
 	if (us > lag_run_max) lag_run_max = us;
 	lag_runs++;
 	lag_rewind = rewind_on;
+}
+
+/* CPU use over the report window: the whole system (all cores, from
+ * /proc/stat) and picoarch's own threads (/proc/self/stat), in percent of
+ * one core. "other" is everything else: rkgame, cubevol, the kernel... */
+static void lag_cpu_use(float *self_pct, float *other_pct) {
+	static unsigned long long last_total, last_busy, last_self;
+	unsigned long long u = 0, n = 0, sy = 0, idle = 0, iow = 0, irq = 0, sirq = 0, st = 0;
+	unsigned long long ut = 0, stt = 0;
+	FILE *f = fopen("/proc/stat", "r");
+	if (f) {
+		if (fscanf(f, "cpu %llu %llu %llu %llu %llu %llu %llu %llu", &u, &n, &sy, &idle, &iow,
+		           &irq, &sirq, &st) < 4)
+			u = n = sy = idle = 0;
+		fclose(f);
+	}
+	if ((f = fopen("/proc/self/stat", "r"))) {
+		char buf[1024];
+		size_t r = fread(buf, 1, sizeof buf - 1, f);
+		buf[r] = '\0';
+		fclose(f);
+		const char *p = strrchr(buf, ')');   /* fields after the name */
+		if (p && sscanf(p + 2, "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu", &ut, &stt) != 2)
+			ut = stt = 0;
+	}
+	unsigned long long busy = u + n + sy + irq + sirq + st, total = busy + idle + iow, self = ut + stt;
+	*self_pct = *other_pct = -1;
+	if (last_total && total > last_total) {
+		/* jiffies over all cores, so x ncores = percent of one core */
+		long cores = sysconf(_SC_NPROCESSORS_ONLN);
+		double dt = (double)(total - last_total) / (cores > 0 ? cores : 1);
+		*self_pct = 100.0 * (self - last_self) / dt;
+		*other_pct = 100.0 * ((busy - last_busy) - (double)(self - last_self)) / dt;
+	}
+	last_total = total; last_busy = busy; last_self = self;
+}
+
+/* A fixed loop of dependent adds, timed: nanoseconds per million
+ * iterations. The same number on every run means the same CPU clock; a
+ * larger one means the CPU is slower (throttled, or a lower clock). */
+static long lag_cpu_speed(void) {
+	struct timespec a, b;
+	unsigned n = 1000000;
+	clock_gettime(CLOCK_MONOTONIC, &a);
+	__asm__ volatile("1: addiu %0, %0, -1\n\tbnez %0, 1b\n\tnop\n" : "+r"(n));
+	clock_gettime(CLOCK_MONOTONIC, &b);
+	return (b.tv_sec - a.tv_sec) * 1000000L + (b.tv_nsec - a.tv_nsec) / 1000;
 }
 
 static void lag_frame(long long present_us) {
@@ -910,10 +950,9 @@ static void lag_frame(long long present_us) {
 	pres_sum += present_us;
 	if (present_us > pres_max) pres_max = present_us;
 	if (now - window_start < 5000000 || !frames) return;
-	char gov[24], cur[24], max[24];
-	lag_read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", gov, sizeof gov);
-	lag_read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", cur, sizeof cur);
-	lag_read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq", max, sizeof max);
+	float self_pct, other_pct;
+	lag_cpu_use(&self_pct, &other_pct);
+	long loop_us = lag_cpu_speed();
 	int sdlq = SDL_PeepEvents(NULL, 0, SDL_PEEKEVENT, SDL_ALLEVENTS);
 	/* emu = retro_run minus the present inside it: the core's own cost.
 	 * skipped = runs that showed no frame (the core's Auto frameskip). */
@@ -921,10 +960,10 @@ static void lag_frame(long long present_us) {
 	long long emu_avg = lag_runs ? (lag_run_sum - pres_sum) / lag_runs : 0;
 	unsigned skipped = lag_runs > frames ? lag_runs - frames : 0;
 	dbg_log("DBG lag: fps=%.1f skipped=%u frame max=%lldms run avg/max=%.1f/%lldms present avg/max=%.1f/%lldms "
-	        "emu~%.1fms audio=%u sdlq=%d cpu=%s %s/%s filter=%d rewind=%d\n",
+	        "emu~%.1fms audio=%u sdlq=%d cpu self/other=%.0f%%/%.0f%% loop=%ldus filter=%d rewind=%d\n",
 	        frames * 1000000.0 / (now - window_start), skipped, int_max / 1000,
 	        run_avg / 1000.0, lag_run_max / 1000, pres_sum / (double)frames / 1000.0, pres_max / 1000,
-	        emu_avg / 1000.0, lag_aring_queued(), sdlq, gov, cur, max,
+	        emu_avg / 1000.0, lag_aring_queued(), sdlq, self_pct, other_pct, loop_us,
 	        (int)scale_filter, lag_rewind);
 	window_start = now;
 	frames = 0; int_max = pres_sum = pres_max = 0;
