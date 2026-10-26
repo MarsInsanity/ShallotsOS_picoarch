@@ -51,6 +51,13 @@ typedef enum
 	MA_VID_ASPECT,
 	MA_VID_FILTER,
 	MA_VID_SHARPNESS,
+	MA_ABOUT_CORE,
+	MA_ABOUT_VERSION,
+	MA_ABOUT_FILE,
+	MA_ABOUT_GAME,
+	MA_ABOUT_VIDEO,
+	MA_ABOUT_AUDIO,
+	MA_ABOUT_FRONTEND,
 } menu_id;
 
 me_bind_action me_ctrl_actions[] =
@@ -843,6 +850,69 @@ static int menu_loop_config_options(int id, int keys)
 	return 0;
 }
 
+/* ---- About: the running emulator in full (the Y menu's emulator list cuts
+ * long names off). Read-only rows: a name on the left, its value right. */
+static const char *mgn_about(int id, int *offs)
+{
+	static char buf[160];
+	struct retro_system_av_info av;
+	const char *b;
+	(void)offs;
+	buf[0] = '\0';
+	switch (id) {
+	case MA_ABOUT_CORE:
+		snprintf(buf, sizeof buf, "%s", core_lib_name[0] ? core_lib_name : core_name);
+		break;
+	case MA_ABOUT_VERSION:
+		snprintf(buf, sizeof buf, "%s", core_lib_version[0] ? core_lib_version : "-");
+		break;
+	case MA_ABOUT_FILE:
+		b = strrchr(core_path, '/');
+		snprintf(buf, sizeof buf, "%s", b ? b + 1 : core_path);
+		break;
+	case MA_ABOUT_GAME:
+		b = (content && content->path[0]) ? strrchr(content->path, '/') : NULL;
+		snprintf(buf, sizeof buf, "%s", b ? b + 1 : (content ? content->path : "-"));
+		break;
+	case MA_ABOUT_VIDEO:
+	case MA_ABOUT_AUDIO:
+		memset(&av, 0, sizeof av);
+		if (current_core.retro_get_system_av_info)
+			current_core.retro_get_system_av_info(&av);
+		if (id == MA_ABOUT_VIDEO)
+			snprintf(buf, sizeof buf, "%ux%u, %.2f fps", av.geometry.base_width,
+			         av.geometry.base_height, av.timing.fps);
+		else
+			snprintf(buf, sizeof buf, "%.0f Hz", av.timing.sample_rate);
+		break;
+	case MA_ABOUT_FRONTEND:
+		snprintf(buf, sizeof buf, "picoarch (ShallotsOS), %s", __DATE__);
+		break;
+	default:
+		break;
+	}
+	return buf;
+}
+
+static menu_entry e_menu_about[] =
+{
+	mee_cust_nosave  ("Emulator",       MA_ABOUT_CORE,     NULL, mgn_about),
+	mee_cust_nosave  ("Version",        MA_ABOUT_VERSION,  NULL, mgn_about),
+	mee_cust_nosave  ("Core file",      MA_ABOUT_FILE,     NULL, mgn_about),
+	mee_cust_nosave  ("Game",           MA_ABOUT_GAME,     NULL, mgn_about),
+	mee_cust_nosave  ("Video",          MA_ABOUT_VIDEO,    NULL, mgn_about),
+	mee_cust_nosave  ("Audio",          MA_ABOUT_AUDIO,    NULL, mgn_about),
+	mee_cust_nosave  ("Frontend",       MA_ABOUT_FRONTEND, NULL, mgn_about),
+	mee_end,
+};
+
+static int menu_loop_about(int id, int keys)
+{
+	static int sel = 0;
+	me_loop(e_menu_about, &sel);
+	return 0;
+}
+
 static menu_entry e_menu_options[] =
 {
 	mee_handler   ("Audio and video",    menu_loop_video_options),
@@ -850,6 +920,7 @@ static menu_entry e_menu_options[] =
 	mee_handler_id("Player controls",    MA_CTRL_PLAYER1,     key_config_loop_wrap),
 	mee_handler_id("Emulator controls",  MA_CTRL_EMU,         key_config_loop_wrap),
 	mee_handler   ("Save config",        menu_loop_config_options),
+	mee_handler   ("About",              menu_loop_about),
 	mee_end,
 };
 
@@ -918,6 +989,14 @@ static void menu_localize(void)
 	e_menu_options[2].name = tr_or("pico.options.player_controls", "Player controls");
 	e_menu_options[3].name = tr_or("pico.options.emulator_controls", "Emulator controls");
 	e_menu_options[4].name = tr_or("pico.options.save_config", "Save config");
+	e_menu_options[5].name = tr_or("pico.options.about", "About");
+	e_menu_about[0].name = tr_or("pico.about.emulator", "Emulator");
+	e_menu_about[1].name = tr_or("pico.about.version", "Version");
+	e_menu_about[2].name = tr_or("pico.about.core_file", "Core file");
+	e_menu_about[3].name = tr_or("pico.about.game", "Game");
+	e_menu_about[4].name = tr_or("pico.about.video", "Video");
+	e_menu_about[5].name = tr_or("pico.about.audio", "Audio");
+	e_menu_about[6].name = tr_or("pico.about.frontend", "Frontend");
 	e_menu_video_options[0].name = tr_or("pico.video.show_fps", "Show FPS");
 	e_menu_video_options[1].name = tr_or("pico.video.show_cpu", "Show CPU %");
 	e_menu_video_options[2].name = tr_or("pico.video.fast_forward", "Fast forward (SELECT+R1)");
@@ -1249,9 +1328,16 @@ static void me_draw_miyoo(const menu_entry *entries, int sel, void (*draw_more)(
 		const char *name = ent->name;
 		if ((!name || !name[0]) && ent->generate_name)
 			name = ent->generate_name(ent->id, &offs);
-		char value[96];
+		char value[160];
 		int can_change;
 		me_value_text(ent, value, sizeof value, &can_change);
+		/* Long values (a game's file name on About) keep room for the name. */
+		while (value[0] && menu_font_measure(value) > (W - pad * 2) * 2 / 3) {
+			size_t len = strlen(value);
+			if (len <= 4) { value[0] = '\0'; break; }
+			value[len - 4] = '\0';
+			strcat(value, "...");
+		}
 		int right = W - pad, vw = menu_font_measure(value), a = rh / 4;
 		if (value[0]) {
 			if (can_change) {
