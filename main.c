@@ -1601,6 +1601,32 @@ static void count_fps(void)
 	}
 }
 
+#ifdef PLATFORM_SF3000
+/* The stock cores draw only every other frame unless the frontend calls
+ * SetFrameSkip(0). The stock frontend calls it before every frame: skip the
+ * next one while the game is behind, draw otherwise. Do the same: skip when
+ * this frame starts more than half a frame late on the frame schedule, at
+ * most two in a row. */
+static void stock_frameskip_tick(void) {
+	static long long deadline;
+	static int skipped_run;
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	long long now = (long long)t.tv_sec * 1000000 + t.tv_nsec / 1000;
+	long long period = frame_rate > 0 ? (long long)(1000000 / frame_rate) : 16667;
+	bool skip = false;
+
+	if (!deadline || now - deadline > 100000 || deadline - now > period) {
+		deadline = now;             /* start, menu, pause: no debt or credit */
+	} else if (now - deadline > period / 2 && skipped_run < 2) {
+		skip = true;
+	}
+	skipped_run = skip ? skipped_run + 1 : 0;
+	deadline += period;
+	current_core.stock_set_frameskip(skip ? 1 : 0);
+}
+#endif
+
 static void adjust_audio(void) {
 	static unsigned prev_audio_buffer_size = 0;
 
@@ -1641,6 +1667,10 @@ static void adjust_audio(void) {
 		}
 		current_core.retro_audio_buffer_status(true, (int)(occupancy * 100), behind);
 	}
+#ifdef PLATFORM_SF3000
+	if (current_core.stock_set_frameskip)
+		stock_frameskip_tick();
+#endif
 }
 
 static void get_tag_name(const char* in_path, char* out_tag) {

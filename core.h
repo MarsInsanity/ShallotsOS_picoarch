@@ -29,6 +29,9 @@ struct core_cbs {
 	void *(*retro_get_memory_data)(unsigned id);
 	size_t (*retro_get_memory_size)(unsigned id);
 	retro_audio_buffer_status_callback_t retro_audio_buffer_status;
+	/* The stock firmware's Snes9x 2005 (libemu_sfc.so): skip drawing the
+	 * next frame (1) or not (0), set by the frontend before every frame. */
+	void (*stock_set_frameskip)(int skip);
 };
 
 extern struct core_cbs current_core;

@@ -1054,6 +1054,7 @@ int core_open(const char *corefile, const char *tag_name) {
 	current_core.retro_set_controller_port_device = dlsym(current_core.handle, "retro_set_controller_port_device");
 	current_core.retro_reset = dlsym(current_core.handle, "retro_reset");
 	current_core.retro_run = dlsym(current_core.handle, "retro_run");
+	current_core.stock_set_frameskip = dlsym(current_core.handle, "SetFrameSkip");
 	current_core.retro_serialize_size = dlsym(current_core.handle, "retro_serialize_size");
 	current_core.retro_serialize = dlsym(current_core.handle, "retro_serialize");
 	current_core.retro_unserialize = dlsym(current_core.handle, "retro_unserialize");
