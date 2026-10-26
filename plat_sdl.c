@@ -872,8 +872,6 @@ static long long lag_us(void) {
 	return (long long)t.tv_sec * 1000000 + t.tv_nsec / 1000;
 }
 
-}
-
 /* Time in retro_run (emulation plus the present inside it), from main.c. */
 static long long lag_run_sum, lag_run_max;
 static unsigned lag_runs;
