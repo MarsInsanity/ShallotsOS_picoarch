@@ -1629,6 +1629,16 @@ static void adjust_audio(void) {
 #else
 		bool behind = occupancy < 0.50;
 #endif
+		/* At most two skipped frames in a row, then one is drawn. Cores
+		 * skip for as long as "behind" stays set (Snes9x 2005 up to 30
+		 * frames: half a second of frozen picture in Yoshi's Island). */
+		static int behind_run;
+		if (behind && ++behind_run > 2) {
+			behind = false;
+			behind_run = 0;
+		} else if (!behind) {
+			behind_run = 0;
+		}
 		current_core.retro_audio_buffer_status(true, (int)(occupancy * 100), behind);
 	}
 }
