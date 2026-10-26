@@ -1604,9 +1604,10 @@ static void count_fps(void)
 #ifdef PLATFORM_SF3000
 /* The stock cores draw only every other frame unless the frontend calls
  * SetFrameSkip(0). The stock frontend calls it before every frame: skip the
- * next one while the game is behind, draw otherwise. Do the same: skip when
- * this frame starts more than half a frame late on the frame schedule, at
- * most two in a row. */
+ * next one while the game is behind, draw otherwise. Measured with stockprobe
+ * on Yoshi's Island, it skips once about a full frame late, at most three in
+ * a row (a drawn frame costs 17-22 ms there, a skipped one 7-9 ms). Do the
+ * same. */
 static void stock_frameskip_tick(void) {
 	static long long deadline;
 	static int skipped_run;
@@ -1618,7 +1619,7 @@ static void stock_frameskip_tick(void) {
 
 	if (!deadline || now - deadline > 100000 || deadline - now > period) {
 		deadline = now;             /* start, menu, pause: no debt or credit */
-	} else if (now - deadline > period / 2 && skipped_run < 2) {
+	} else if (now - deadline > period && skipped_run < 3) {
 		skip = true;
 	}
 	skipped_run = skip ? skipped_run + 1 : 0;
