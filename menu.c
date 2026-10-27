@@ -496,9 +496,9 @@ static void core_option_field(char *dst, size_t dst_size, const char *src,
 		return;
 	}
 
-	/* Show the beginning for 250ms, then move one character every 70ms.
+	/* Show the beginning for 400ms, then move one character every 150ms.
 	 * Three spaces make the wrap point clear. */
-	size_t pos = elapsed_ms < 250 ? 0 : 1 + (elapsed_ms - 250) / 70;
+	size_t pos = elapsed_ms < 400 ? 0 : 1 + (elapsed_ms - 400) / 150;
 	size_t cycle = len + 3;
 	for (size_t i = 0; i < visible; i++) {
 		size_t at = (pos + i) % cycle;
@@ -540,6 +540,33 @@ static void core_options_draw(menu_entry *menu,
 	}
 }
 
+typedef struct {
+	menu_entry *menu;
+	struct core_option_entry **page_entries;
+	size_t page_count;
+	int sel;
+	unsigned int selected_since;
+	unsigned int last_draw;
+	char names[MENU_ITEMS_PER_PAGE][CORE_OPTION_LABEL_CHARS + 1];
+	char values[MENU_ITEMS_PER_PAGE][CORE_OPTION_VALUE_CHARS + 1];
+} core_options_draw_state;
+
+static void core_options_idle_draw(void *data)
+{
+	core_options_draw_state *state = data;
+	struct core_option_entry *entry = state->page_entries[state->sel];
+	const char *value = entry->labels && entry->labels[entry->value]
+		? entry->labels[entry->value] : "";
+	unsigned int now = plat_get_ticks_ms();
+	if (now - state->selected_since < 400 || now - state->last_draw < 33 ||
+		((entry->desc ? strlen(entry->desc) : 0) <= CORE_OPTION_LABEL_CHARS &&
+		 strlen(value) <= CORE_OPTION_VALUE_CHARS))
+		return;
+	state->last_draw = now;
+	core_options_draw(state->menu, state->page_entries, state->page_count,
+		state->sel, state->selected_since, state->names, state->values);
+}
+
 static int core_options_loop(menu_entry *menu,
 	struct core_option_entry **page_entries, size_t page_count, int *menu_sel)
 {
@@ -547,8 +574,9 @@ static int core_options_loop(menu_entry *menu,
 	int sel_max = me_count(menu) - 1;
 	int previous_sel;
 	unsigned int selected_since = plat_get_ticks_ms();
-	char names[MENU_ITEMS_PER_PAGE][CORE_OPTION_LABEL_CHARS + 1];
-	char values[MENU_ITEMS_PER_PAGE][CORE_OPTION_VALUE_CHARS + 1];
+	core_options_draw_state draw_state = { .menu = menu,
+		.page_entries = page_entries, .page_count = page_count,
+		.names = {{0}}, .values = {{0}} };
 
 	if (sel_max < 0)
 		return 0;
@@ -557,8 +585,12 @@ static int core_options_loop(menu_entry *menu,
 	while ((!menu[sel].enabled || !menu[sel].selectable) && sel < sel_max)
 		sel++;
 	previous_sel = sel;
-
-	core_options_draw(menu, page_entries, page_count, sel, selected_since, names, values);
+	menu_selection_reset();
+	draw_state.sel = sel;
+	draw_state.selected_since = selected_since;
+	draw_state.last_draw = selected_since - 33;
+	core_options_draw(menu, page_entries, page_count, sel, selected_since,
+		draw_state.names, draw_state.values);
 	while (in_menu_wait_any(NULL, 50) & (PBTN_MOK | PBTN_MBACK | PBTN_MENU))
 		;
 
@@ -566,10 +598,20 @@ static int core_options_loop(menu_entry *menu,
 		if (sel != previous_sel) {
 			previous_sel = sel;
 			selected_since = plat_get_ticks_ms();
+			draw_state.last_draw = selected_since - 33;
 		}
-		core_options_draw(menu, page_entries, page_count, sel, selected_since, names, values);
+		draw_state.sel = sel;
+		draw_state.selected_since = selected_since;
+		do {
+			core_options_draw(menu, page_entries, page_count, sel, selected_since,
+				draw_state.names, draw_state.values);
+			if (menu_selection_animating())
+				plat_sleep_ms(16);
+		} while (menu_selection_animating());
+		in_menu_wait_set_idle_callback(core_options_idle_draw, &draw_state);
 		inp = in_menu_wait(PBTN_UP | PBTN_DOWN | PBTN_LEFT | PBTN_RIGHT |
 			PBTN_MOK | PBTN_MBACK | PBTN_MENU | PBTN_L | PBTN_R, NULL, 70);
+		in_menu_wait_set_idle_callback(NULL, NULL);
 		if (inp & (PBTN_MENU | PBTN_MBACK))
 			break;
 		if (inp & PBTN_UP) {
@@ -1547,6 +1589,7 @@ static void minui_draw_main(menu_entry *menu, int sel) {
 static int minui_main_loop(menu_entry *menu, int *menu_sel) {
 	extern void pa_toast_later(const char *text);
 	int ret = 0, inp, sel = *menu_sel, smax = me_count(menu) - 1;
+	menu_selection_reset();
 	if (smax < 0) return 0;
 	while ((!menu[sel].enabled || !menu[sel].selectable) && sel < smax) sel++;
 	{
@@ -1628,6 +1671,7 @@ static int minui_main_loop(menu_entry *menu, int *menu_sel) {
 			if (menu[sel].handler) {
 				ret = menu[sel].handler(menu[sel].id, inp);
 				if (ret) break;
+				menu_selection_reset(); /* nested menus share the pill animator */
 				smax = me_count(menu) - 1;   /* enables may have changed */
 			}
 		}

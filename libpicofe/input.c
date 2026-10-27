@@ -42,6 +42,8 @@ static int in_dev_count = 0;		/* probed + bind devices */
 static int in_have_async_devs = 0;
 static int in_probe_dev_id;
 static int menu_key_state = 0;
+static void (*menu_wait_idle_callback)(void *);
+static void *menu_wait_idle_data;
 static int menu_last_used_dev = 0;
 static int menu_key_prev = 0;
 static int menu_key_mask = 0;
@@ -340,6 +342,8 @@ static int in_update_kc_async(int *dev_id_out, int *is_down_out, int timeout_ms)
 			break;
 
 		plat_sleep_ms(10);
+		if (menu_wait_idle_callback)
+			menu_wait_idle_callback(menu_wait_idle_data);
 	}
 
 	return -1;
@@ -379,9 +383,21 @@ int in_update_keycode(int *dev_id_out, int *is_down_out, char *charcode, int tim
 
 	while (1)
 	{
-		ret = plat_wait_event(fds_hnds, count, timeout_ms);
-		if (ret < 0)
-			break;
+		int wait_ms = timeout_ms;
+		if (menu_wait_idle_callback && (wait_ms < 0 || wait_ms > 16))
+			wait_ms = 16;
+		ret = plat_wait_event(fds_hnds, count, wait_ms);
+		if (ret < 0) {
+			if (!menu_wait_idle_callback)
+				break;
+			menu_wait_idle_callback(menu_wait_idle_data);
+			if (timeout_ms >= 0) {
+				timeout_ms -= wait_ms;
+				if (timeout_ms <= 0)
+					break;
+			}
+			continue;
+		}
 
 		for (i = 0; i < in_dev_count; i++) {
 			if (in_devices[i].drv_fd_hnd == ret) {
@@ -408,6 +424,8 @@ int in_update_keycode(int *dev_id_out, int *is_down_out, char *charcode, int tim
 			if (timeout_ms <= 0)
 				break;
 		}
+		if (menu_wait_idle_callback)
+			menu_wait_idle_callback(menu_wait_idle_data);
 	}
 
 	if (result < 0)
@@ -428,6 +446,12 @@ finish:
 	if (is_down_out != NULL)
 		*is_down_out = is_down;
 	return result;
+}
+
+void in_menu_wait_set_idle_callback(void (*callback)(void *), void *data)
+{
+	menu_wait_idle_callback = callback;
+	menu_wait_idle_data = data;
 }
 
 /* same as above, only return bitfield of PBTN_*  */
