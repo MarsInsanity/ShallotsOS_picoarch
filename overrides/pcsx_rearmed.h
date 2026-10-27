@@ -34,6 +34,20 @@ static const struct core_override_option pcsx_rearmed_core_option_overrides[] = 
 		.default_value = "disabled",
 	},
 	{
+		.key = "pcsx_rearmed_spu_reverb",
+		.desc = "Sound Reverb",
+		/* Reverb is one of the SPU's costliest parts on a 590 MHz single
+		 * core; off, heavy scenes crackle less. */
+		.info = "Echo effects in the game's sound. Costs CPU; off by default on this device.",
+		.default_value = "disabled",
+	},
+	{
+		.key = "pcsx_rearmed_spu_interpolation",
+		.desc = "Sound Interpolation",
+		.info = "Smooths sampled sound. Simple is cheap; Gaussian and Cubic cost more CPU.",
+		.default_value = "simple",
+	},
+	{
 		.key = "pcsx_rearmed_spu_thread",
 		.desc = "Threaded SPU",
 		.info = "Mixes sound on a separate thread. The SF3000 family has one CPU core, so this only adds switching; keep it off.",

@@ -170,6 +170,7 @@ static void apply_brightness(int level) {
 extern int g_switcher_enabled;   /* defined with the GameSwitcher code below */
 int g_game_keys = 0;   /* FrogUI "game_keys": 0 = FN, 1 = hold SELECT/START, 2 = combos */
 static int g_power_resume = 1;   /* FrogUI "Resume After Power-Off" */
+static int g_frameskip_audio;    /* FrogUI "frameskip=audio": the audio-buffer rule */
 static int g_own_sleep;          /* ShallotsOS sleep on a short press, see own_sleep */
 static long long g_sleep_poweroff_ms = 5 * 60 * 1000;   /* FrogUI "Sleep Power-Off" */
 static void load_frogui_settings(void) {
@@ -185,6 +186,7 @@ static void load_frogui_settings(void) {
 	g_quick_resume     = frogui_setting_is("auto_resume", "on");
 	g_autosave_autoload = frogui_setting_is("autosave_autoload", "on");
 	g_stock_battery    = !frogui_setting_is("stock_battery", "off");
+	g_frameskip_audio  = frogui_setting_is("frameskip", "audio");
 	/* With ShallotsOS's volume indicator (cubegm/shallots_osd), cubevol no
 	 * longer draws on fb1 and the plane carries ShallotsOS's popups, so it
 	 * must not be blanked during play. Unless the takeover ever failed. */
@@ -1608,14 +1610,12 @@ static void count_fps(void)
 	}
 }
 
-#ifdef PLATFORM_SF3000
-/* The stock cores draw only every other frame unless the frontend calls
- * SetFrameSkip(0). The stock frontend calls it before every frame: skip the
- * next one while the game is behind, draw otherwise. Measured with stockprobe
- * on Yoshi's Island, it skips once about a full frame late, at most three in
- * a row (a drawn frame costs 17-22 ms there, a skipped one 7-9 ms). Do the
- * same. */
-static void stock_frameskip_tick(void) {
+/* Frame timing for frameskip, the rule the stock frontend uses (measured
+ * with stockprobe on Yoshi's Island): skip the next frame once the game is
+ * about a full frame behind its schedule, at most three in a row (a drawn
+ * frame costs 17-22 ms there, a skipped one 7-9 ms). Called once per
+ * emulated frame. */
+static bool frame_late_tick(void) {
 	static long long deadline;
 	static int skipped_run;
 	struct timespec t;
@@ -1631,9 +1631,8 @@ static void stock_frameskip_tick(void) {
 	}
 	skipped_run = skip ? skipped_run + 1 : 0;
 	deadline += period;
-	current_core.stock_set_frameskip(skip ? 1 : 0);
+	return skip;
 }
-#endif
 
 static void adjust_audio(void) {
 	static unsigned prev_audio_buffer_size = 0;
@@ -1652,32 +1651,50 @@ static void adjust_audio(void) {
 		prev_audio_buffer_size = current_audio_buffer_size;
 	}
 
+	bool late = frame_late_tick();
 	if (current_core.retro_audio_buffer_status) {
 		float occupancy = 1.0 - plat_sound_capacity();
-		/* "Underrun likely" drives the cores' Auto frameskip. The SF3000 ring
-		 * is kept between half and three quarters full, so half full is a
-		 * game running at speed; only below a quarter (~20 ms, about one
-		 * frame of audio) is the game falling behind. */
+		bool behind;
+		if (!g_frameskip_audio) {
+			/* "Underrun likely" drives the cores' Auto frameskip. Timing
+			 * reacts within a frame, the audio ring only after it has
+			 * drained for several. A nearly empty ring still counts. */
+			static int behind_run;
+			behind = late || occupancy < 0.10;
+			if (behind && ++behind_run > 3) {
+				behind = false;
+				behind_run = 0;
+			} else if (!behind) {
+				behind_run = 0;
+			}
+		} else {
+			/* The SF3000 ring is kept between half and three quarters
+			 * full, so half full is a game running at speed; only below a
+			 * quarter (~20 ms, about one frame of audio) is the game
+			 * falling behind. */
 #ifdef PLATFORM_SF3000
-		bool behind = occupancy < 0.25;
+			behind = occupancy < 0.25;
 #else
-		bool behind = occupancy < 0.50;
+			behind = occupancy < 0.50;
 #endif
-		/* At most two skipped frames in a row, then one is drawn. Cores
-		 * skip for as long as "behind" stays set (Snes9x 2005 up to 30
-		 * frames: half a second of frozen picture in Yoshi's Island). */
-		static int behind_run;
-		if (behind && ++behind_run > 2) {
-			behind = false;
-			behind_run = 0;
-		} else if (!behind) {
-			behind_run = 0;
+			/* At most two skipped frames in a row, then one is drawn. Cores
+			 * skip for as long as "behind" stays set (Snes9x 2005 up to 30
+			 * frames: half a second of frozen picture in Yoshi's Island). */
+			static int behind_run;
+			if (behind && ++behind_run > 2) {
+				behind = false;
+				behind_run = 0;
+			} else if (!behind) {
+				behind_run = 0;
+			}
 		}
 		current_core.retro_audio_buffer_status(true, (int)(occupancy * 100), behind);
 	}
 #ifdef PLATFORM_SF3000
+	/* The stock cores draw only every other frame unless the frontend calls
+	 * SetFrameSkip(0) before every frame, as the stock frontend does. */
 	if (current_core.stock_set_frameskip)
-		stock_frameskip_tick();
+		current_core.stock_set_frameskip(late ? 1 : 0);
 #endif
 }
 
