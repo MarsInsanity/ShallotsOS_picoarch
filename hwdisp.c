@@ -557,7 +557,7 @@ void hwdisp_set_panel_scale(int m) { g_panel_scale = m; }
 static uint16_t *g_stage[2];
 static int g_stage_i;
 static unsigned char g_stage_owner[2];
-enum { STAGE_PANEL = 1, STAGE_INTEGER, STAGE_PRESCALE, STAGE_DIRECT };
+enum { STAGE_PANEL = 1, STAGE_INTEGER, STAGE_PRESCALE, STAGE_DIRECT, STAGE_ASPECT };
 static uint16_t *stage_next(int owner, int *slot)
 {
     int i = g_stage_i;
@@ -616,6 +616,44 @@ static uint16_t *integer_envelope_build(const void *src, int w, int h,
     return dst;
 }
 
+/* The R36SX panel is 640x480: a target within 1% of 4:3 is the GE's
+ * stretch-fill, free. */
+static int target_is_panel(void) {
+    if (g_aspect_num <= 0 || g_aspect_den <= 0) return 0;
+    long d = (long)g_aspect_num * PANEL_PH - (long)g_aspect_den * PANEL_PW;
+    if (d < 0) d = -d;
+    return d * 100 < (long)g_aspect_den * PANEL_PW;
+}
+
+/* The GE's aspect-fit keeps the frame's own w:h, which is wrong for
+ * non-square pixels (PS1 512x240 came out about 2.1:1). Pad the frame with
+ * black to the target ratio while staging it (the copy is made anyway), so
+ * fit gives the right shape. NULL when no padding is needed or it won't fit. */
+static uint16_t *aspect_envelope_build(const void *src, int w, int h,
+                                       int pitch_bytes, int *out_w, int *out_h) {
+    static unsigned geo[2];
+    int num = g_aspect_num, den = g_aspect_den;
+    if (num <= 0 || den <= 0) return NULL;
+    long a = (long)w * den, b = (long)h * num;
+    long d = a > b ? a - b : b - a;
+    if (d * 100 < b) return NULL;             /* already within 1% */
+    int ew = w, eh = h;
+    if (a < b) ew = (int)((b + den / 2) / den + 1) & ~1;
+    else       eh = (int)((a + num / 2) / num);
+    if (ew > PANEL_PW || eh > PANEL_PH) return NULL;
+    int bi;
+    uint16_t *dst = stage_next(STAGE_ASPECT, &bi);
+    if (!dst) return NULL;
+    unsigned g = ((unsigned)ew << 20) ^ ((unsigned)eh << 10) ^ (unsigned)w ^ ((unsigned)h << 5);
+    if (geo[bi] != g) { memset(dst, 0, (size_t)ew * eh * 2); geo[bi] = g; }
+    int ox = (ew - w) / 2, oy = (eh - h) / 2;
+    for (int y = 0; y < h; y++)
+        memcpy(dst + (size_t)(oy + y) * ew + ox,
+               (const uint8_t *)src + (size_t)y * pitch_bytes, (size_t)w * 2);
+    *out_w = ew; *out_h = eh;
+    return dst;
+}
+
 /* Ping-pong output buffers: disp_frame DMA-reads the previous frame async, so we
  * write the other buffer — the result is safe to hand straight to disp_frame,
  * no extra staging copy (present_direct skips its copy for panel_build output).
@@ -648,9 +686,12 @@ static uint16_t *panel_build(const void *src, int w, int h, int pitch_bytes, int
             for (int ry=1; ry<n; ry++) memcpy(dr+(size_t)ry*PANEL_PW, dr, (size_t)dw*2); }
     } else { /* nearest stretch: full fills the panel, aspect fits centered w/ bars */
         int dw = PANEL_PW, dh = PANEL_PH, ox = 0, oy = 0;
-        if (mode == 1) {                       /* aspect-fit */
-            if (w * PANEL_PH >= h * PANEL_PW) dh = h * PANEL_PW / w;
-            else                              dw = w * PANEL_PH / h;
+        if (mode == 1) {                       /* aspect-fit, target ratio */
+            int an = w, ad = h;
+            if (g_aspect_num > 0 && g_aspect_den > 0) { an = g_aspect_num; ad = g_aspect_den; }
+            if (an * PANEL_PH >= ad * PANEL_PW) dh = ad * PANEL_PW / an;
+            else                                dw = an * PANEL_PH / ad;
+            dw &= ~1;
             ox = (PANEL_PW - dw) / 2; oy = (PANEL_PH - dh) / 2;
         }
         unsigned geo = ((unsigned)dw<<16)|(unsigned)dh;
@@ -742,6 +783,7 @@ int hwdisp_present_direct(const void *src, int w, int h, int pitch_bytes) {
     int staged = 0;
     int integer_hw = 0;
     int hw_scale = !sw_nearest;   /* whether the GE still scales (needs fill/fit flag) */
+    int asp_fill = game && g_panel_scale == 1 && target_is_panel();
 
     if (sw_nearest && g_filter_sharp && g_panel_scale != 0 /*full/aspect*/) {
         /* Sharp: prescale by the largest N (>=2) that fits the panel, then let
@@ -775,8 +817,14 @@ int hwdisp_present_direct(const void *src, int w, int h, int pitch_bytes) {
         if (b) { psrc = b; pw = PANEL_PW; ph = PANEL_PH; ppitch = PANEL_PW*2; staged = 1; }
     }
 
+    if (!staged && game && g_panel_scale == 1 && !asp_fill) {
+        int ow, oh;
+        uint16_t *b = aspect_envelope_build(src, w, h, pitch_bytes, &ow, &oh);
+        if (b) { psrc = b; pw = ow; ph = oh; ppitch = ow * 2; staged = 1; }
+    }
+
     if (p_aspect && hw_scale) {
-        int fit = integer_hw ? 0 : (g_panel_scale != 2);
+        int fit = (integer_hw || asp_fill) ? 0 : (g_panel_scale != 2);
         hwdisp_set_driver_fit(fit, 0);
     }
     /* disp_frame DMA-reads src asynchronously; handing it the caller's live
