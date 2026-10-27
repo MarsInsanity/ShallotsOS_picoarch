@@ -1,8 +1,8 @@
 #include "overrides.h"
 
 /* HCSNES (github.com/MarsInsanity/HCSNES), Snes9x 2005-based. Default to its
- * Timed frameskip: draw unless the frame starts late, like the stock
- * firmware's frontend does. Uses snes9x2005's controls (same core options). */
+ * Timed frameskip: draw unless the frame starts a full frame late, at most
+ * three skips in a row, like the stock firmware's frontend (HCSNES 0.4). Uses snes9x2005's controls (same core options). */
 static const struct core_override_option hcsnes_core_option_overrides[] = {
 	{
 		.key = "snes9x_2005_frameskip",
@@ -10,7 +10,7 @@ static const struct core_override_option hcsnes_core_option_overrides[] = {
 	},
 	{
 		.key = "snes9x_2005_frameskip_interval",
-		.default_value = "2"
+		.default_value = "3"
 	},
 	{ NULL }
 };
