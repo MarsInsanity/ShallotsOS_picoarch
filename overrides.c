@@ -29,6 +29,7 @@ static const struct core_override overrides[] = {
 	gpsp_overrides,
 	mame2000_overrides,
 	pcsx_rearmed_overrides,
+	hcps1_overrides,
 	picodrive_overrides,
 	pokemini_overrides,
 	quicknes_overrides,

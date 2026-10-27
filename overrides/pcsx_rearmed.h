@@ -36,8 +36,8 @@ static const struct core_override_option pcsx_rearmed_core_option_overrides[] = 
 	{
 		.key = "pcsx_rearmed_spu_thread",
 		.desc = "Threaded SPU",
-		.info = "Mixes sound on another CPU core. Frees the main core for the game; turn off if a game's music drifts or stutters.",
-		.default_value = "enabled",
+		.info = "Mixes sound on a separate thread. The SF3000 family has one CPU core, so this only adds switching; keep it off.",
+		.default_value = "disabled",
 	},
 	
 	// TODO: don't apply to TRIMUI
@@ -213,6 +213,16 @@ const struct core_override_fast_forward pcsx_rearmed_fast_forward = {
 
 #define pcsx_rearmed_overrides {                               \
 	.core_name = "pcsx_rearmed",                           \
+	.fast_forward = &pcsx_rearmed_fast_forward,            \
+	.actions = pcsx_rearmed_ctrl_actions,                  \
+	.action_size = array_size(pcsx_rearmed_ctrl_actions),  \
+	.options = pcsx_rearmed_core_option_overrides,         \
+}
+
+/* HCPS1 (github.com/MarsInsanity/HCPS1): PCSX ReARMed with Lightrec built
+ * for this hardware. Same core options, so the same overrides. */
+#define hcps1_overrides {                                      \
+	.core_name = "hcps1",                                  \
 	.fast_forward = &pcsx_rearmed_fast_forward,            \
 	.actions = pcsx_rearmed_ctrl_actions,                  \
 	.action_size = array_size(pcsx_rearmed_ctrl_actions),  \
