@@ -2861,20 +2861,38 @@ static int hud_card_build(const char *msg, int frame_h) {
     return hud_w > 0;
 }
 
+/* How much wider than tall one frame pixel ends up on screen: the card is
+ * widened by it so its text keeps its shape (PS1 512x240 shown at 4:3
+ * squeezed it to about half its width). */
+static float hud_xscale(int width, int height) {
+    double ar;                                   /* the frame's shape on screen */
+    if (scale_size == SCALE_SIZE_NONE) return 1.0f;
+    if (scale_size == SCALE_SIZE_FULL) ar = (double)PANEL_ASPECT_NUM / PANEL_ASPECT_DEN;
+    else ar = sf3000_content_aspect();
+    float sx = (float)(width / (height * ar));
+    if (sx < 0.5f) sx = 0.5f;
+    if (sx > 4.0f) sx = 4.0f;
+    return sx;
+}
+
 /* Returns 0 when there is no TTF, so the caller draws the bitmap HUD. */
 static int hud_card_draw(uint16_t *buf, int width, int height, const char *msg) {
     if (!hud_card_build(msg, height)) return 0;
     int m = height / 60 + 2;
+    float sx = hud_xscale(width, height);
+    int dw = (int)(hud_w * sx + 0.5f), mx = (int)(m * sx + 0.5f);
     for (int y = 0; y < hud_h && m + y < height; y++) {
-        uint16_t *d = buf + (size_t)(m + y) * width + m;
+        uint16_t *d = buf + (size_t)(m + y) * width + mx;
         const uint16_t *sp = hud_px + (size_t)y * hud_w;
         const uint8_t *ap = hud_a + (size_t)y * hud_w;
-        for (int x = 0; x < hud_w && m + x < width; x++) {
+        for (int ox = 0; ox < dw && mx + ox < width; ox++) {
+            int x = (int)(ox / sx);
+            if (x >= hud_w) x = hud_w - 1;
             unsigned a = ap[x];
-            if (a == 255) d[x] = sp[x];
+            if (a == 255) d[ox] = sp[x];
             else if (a) {
-                unsigned k = 255 - a, c = d[x];
-                d[x] = (uint16_t)(((((c >> 11) & 31) * k / 255) << 11) |
+                unsigned k = 255 - a, c = d[ox];
+                d[ox] = (uint16_t)(((((c >> 11) & 31) * k / 255) << 11) |
                                   ((((c >> 5) & 63) * k / 255) << 5) | ((c & 31) * k / 255));
             }
         }
