@@ -185,6 +185,13 @@ static void load_frogui_settings(void) {
 	g_quick_resume     = frogui_setting_is("auto_resume", "on");
 	g_autosave_autoload = frogui_setting_is("autosave_autoload", "on");
 	g_stock_battery    = !frogui_setting_is("stock_battery", "off");
+	/* With ShallotsOS's volume indicator (cubegm/shallots_osd), cubevol no
+	 * longer draws on fb1 and the plane carries ShallotsOS's popups, so it
+	 * must not be blanked during play. Unless the takeover ever failed. */
+	if (!frogui_setting_is("osd", "stock") &&
+	    access("/mnt/sdcard/cubegm/shallots_osd", X_OK) == 0 &&
+	    access("/mnt/sdcard/frogui/.osd_failed", F_OK) != 0)
+		g_stock_battery = 0;
 	g_brightness       = frogui_setting_int("brightness", -1);   /* applied on game path only */
 	g_switcher_enabled = !frogui_setting_is("game_switcher", "off");
 	g_power_resume = !frogui_setting_is("power_resume", "off");
