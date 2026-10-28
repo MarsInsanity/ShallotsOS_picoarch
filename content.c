@@ -77,7 +77,7 @@ static int content_load_zip(struct content *content) {
 				goto finish;
 			}
 
-			if (content->tmpfile)
+			if (content->tmpfile && !content->tmpfile_kept)
 				remove(content->tmpfile);
 
 			free(content->tmpfile);
@@ -88,11 +88,22 @@ static int content_load_zip(struct content *content) {
 				goto finish;
 			}
 
-			if (unzip_tmp(f, extensions, content->tmpfile, MAX_PATH)) {
+			struct stat zst;
+			char stamp[MAX_PATH + 64];
+			bool reused;
+			if (stat(content->path, &zst) != 0)
+				memset(&zst, 0, sizeof zst);
+			snprintf(stamp, sizeof stamp, "%s\n%lld %lld\n", content->path,
+			         (long long)zst.st_size, (long long)zst.st_mtime);
+			if (unzip_tmp(f, extensions, stamp, content->tmpfile, MAX_PATH, &reused)) {
+				remove(content->tmpfile);
 				free(content->tmpfile);
 				content->tmpfile = NULL;
 				goto finish;
 			}
+			/* On the SD card the unpacked ROM is kept for the next launch. */
+			content->tmpfile_kept = strcmp(unzip_tmp_dir(), "/tmp") != 0;
+			PA_INFO("%s %s\n", reused ? "Reusing unpacked" : "Unpacked", content->tmpfile);
 
 			ret = 0;
 		}
@@ -233,10 +244,11 @@ static int content_patch_file(struct content *content, const char *path) {
 		goto finish;
 	}
 
-	if (content->tmpfile)
+	if (content->tmpfile && !content->tmpfile_kept)
 		remove(content->tmpfile);
 
 	free(content->tmpfile);
+	content->tmpfile_kept = false;   /* the patched copy is per launch */
 
 	content->tmpfile = calloc(MAX_PATH, sizeof(*content->tmpfile));
 	if (!content->tmpfile) {
@@ -247,7 +259,7 @@ static int content_patch_file(struct content *content, const char *path) {
 	content_name = basename(content_path);
 	/* Deterministic temp name (see unzip_tmp): a randomized name broke in-place
 	 * saves for cores that derive their .srm from the ROM path. */
-	snprintf(content->tmpfile, MAX_PATH, "/tmp/pa-%s", content_name);
+	snprintf(content->tmpfile, MAX_PATH, "%s/pa-patched-%s", unzip_tmp_dir(), content_name);
 
 	outfile = fopen(content->tmpfile, "w");
 	if (!outfile) {
@@ -397,7 +409,7 @@ void content_free(struct content *content) {
 	if (!content)
 		return;
 
-	if (content->tmpfile) {
+	if (content->tmpfile && !content->tmpfile_kept) {
 		remove(content->tmpfile);
 	}
 

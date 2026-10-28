@@ -1,7 +1,11 @@
+#include <dirent.h>
+#include <libgen.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "main.h"
 #include "unzip.h"
 #include "util.h"
@@ -155,18 +159,83 @@ static int find_entry(FILE *zip, const char **extensions, struct file_info *info
 	return ret;
 }
 
-int unzip_tmp(FILE *zip, const char **extensions, char *filename, size_t len) {
+/* /tmp is RAM on these consoles (ramfs: never swapped, never reclaimed),
+ * and a ROM unpacked there stayed in RAM next to the core's own copy; after
+ * a crash it stayed until reboot and starved every later game (GTA Advance:
+ * out-of-memory kills). The SD card costs no RAM. */
+#ifndef UNZIP_SD_DIR
+#define UNZIP_SD_DIR "/mnt/sdcard/picoarch/.unzipped"
+#endif
+
+const char *unzip_tmp_dir(void) {
+	static const char *dir;
+	if (!dir) {
+		char parent[] = UNZIP_SD_DIR;
+		mkdir(dirname(parent), 0755);
+		mkdir(UNZIP_SD_DIR, 0755);
+		dir = access(UNZIP_SD_DIR, W_OK) == 0 ? UNZIP_SD_DIR : "/tmp";
+	}
+	return dir;
+}
+
+static bool stamp_matches(const char *rom, const char *stamp) {
+	char path[MAX_PATH + 8], buf[MAX_PATH + 64];
+	snprintf(path, sizeof path, "%s.src", rom);
+	FILE *f = fopen(path, "r");
+	size_t n = 0;
+	if (f) {
+		n = fread(buf, 1, sizeof buf - 1, f);
+		fclose(f);
+	}
+	buf[n] = '\0';
+	return f && access(rom, R_OK) == 0 && strcmp(buf, stamp) == 0;
+}
+
+/* Keep one unpacked ROM: remove the others (a ROM is recognised by its .src
+ * stamp; anything else, such as a core's in-place save, stays). */
+static void remove_other_roms(const char *dir, const char *keep) {
+	DIR *d = opendir(dir);
+	struct dirent *e;
+	char path[MAX_PATH + 8];
+	if (!d)
+		return;
+	while ((e = readdir(d))) {
+		size_t n = strlen(e->d_name);
+		if (n < 8 || strncmp(e->d_name, "pa-", 3) || strcmp(e->d_name + n - 4, ".src"))
+			continue;
+		snprintf(path, sizeof path, "%s/%.*s", dir, (int)(n - 4), e->d_name);
+		if (strcmp(path, keep)) {
+			remove(path);
+			snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+			remove(path);
+		}
+	}
+	closedir(d);
+}
+
+int unzip_tmp(FILE *zip, const char **extensions, const char *stamp,
+              char *filename, size_t len, bool *reused) {
 	int ret = -1;
 	struct file_info info = {0};
 	FILE *dest = NULL;
+	char stamp_path[MAX_PATH + 8] = "";
 
+	*reused = false;
 	if (!find_entry(zip, extensions, &info)) {
 		/* Deterministic temp name (was mkstemps → random each launch). Cores
 		 * that save in-place derive their .srm from the ROM path we hand them;
 		 * a randomized name meant a zipped ROM got a different save file every
 		 * run, so in-game saves couldn't be reloaded (gpsp_multicore). A stable
 		 * name keyed on the inner ROM name keeps the save path constant. */
-		snprintf(filename, len, "/tmp/pa-%s", basename(info.filename));
+		const char *dir = unzip_tmp_dir();
+		snprintf(filename, len, "%s/pa-%s", dir, basename(info.filename));
+		if (strcmp(dir, "/tmp") && stamp_matches(filename, stamp)) {
+			*reused = true;
+			return 0;
+		}
+		remove_other_roms(dir, filename);
+		snprintf(stamp_path, sizeof stamp_path, "%s.src", filename);
+		remove(stamp_path);   /* no stamp until the ROM is complete */
 		dest = fopen(filename, "w");
 
 		if (!dest) {
@@ -183,8 +252,15 @@ int unzip_tmp(FILE *zip, const char **extensions, char *filename, size_t len) {
 	}
 
 finish:
-	if (dest)
-		fclose(dest);
+	if (dest && fclose(dest) != 0)
+		ret = -1;
+	if (ret == 0 && strcmp(unzip_tmp_dir(), "/tmp")) {
+		FILE *s = fopen(stamp_path, "w");
+		if (s) {
+			fputs(stamp, s);
+			fclose(s);
+		}
+	}
 	return ret;
 }
 
